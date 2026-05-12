@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # 自定义域名（可选，推荐配置）
 # 取消注释并替换为你自己的域名和 Zone ID
 # routes = [
-#   { pattern = "tvbox.lml1971.ccwu.cc.com/*", zone_id = "af2e1b859cfd05d013db3ba24d102a4e" }
+#   { pattern = "lml1971.ccwu.cc/*", zone_id = "af2e1b859cfd05d013db3ba24d102a4e" }
 # ]
 
 [triggers]
@@ -21,4 +21,4 @@ preview_id = "733833bbd6d74d38b0ef997c9e00dc0d"
 SPEED_TIMEOUT_MS = "5000"   # 源地址延迟阈值（毫秒）
 SITE_TIMEOUT_MS = "3000"    # 站点 API 延迟阈值（毫秒）
 FETCH_TIMEOUT_MS = "5000"   # 抓取配置 JSON 超时（毫秒）
-WORKER_BASE_URL = "https://tvbox.lml1971.ccwu.cc.com"  # CF 边缘代理依赖此配置（JAR/MacCMS/直播源代理）
+WORKER_BASE_URL = "https://lml1971.ccwu.cc"  # CF 边缘代理依赖此配置（JAR/MacCMS/直播源代理）
