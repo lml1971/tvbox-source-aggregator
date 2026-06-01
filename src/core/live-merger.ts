@@ -149,6 +149,35 @@ function parseTxt(content: string, source: string, sourceSpeedMs?: number): Chan
   return out;
 }
 
+function sanitizeTxtLabel(label: string, fallback: string): string {
+  const cleaned = label.replace(/[\r\n]+/g, ' ').replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned || fallback;
+}
+
+/**
+ * 将 TVBox Native live groups 转为 DIYP/txt 格式：
+ *   央视,#genre#
+ *   CCTV-1,http://url1$源A#http://url2$源B
+ */
+export function formatLiveGroupsAsTxt(groups: TVBoxLiveGroup[]): string {
+  const lines: string[] = [];
+
+  for (const group of groups) {
+    const groupName = sanitizeTxtLabel(group.group || '', '其他');
+    lines.push(`${groupName},#genre#`);
+
+    for (const channel of group.channels || []) {
+      const urls = (channel.urls || []).filter((url) => url.trim());
+      if (urls.length === 0) continue;
+
+      const channelName = sanitizeTxtLabel(channel.name || '', '未命名');
+      lines.push(`${channelName},${urls.join('#')}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 /** 自动识别 m3u 还是 txt */
 function parseLiveContent(content: string, source: string, sourceSpeedMs?: number): ChannelEntry[] {
   if (content.includes('#EXTM3U') || content.includes('#EXTINF')) {

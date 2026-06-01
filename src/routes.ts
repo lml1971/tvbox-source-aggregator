@@ -19,7 +19,8 @@ import { loadCredentials, saveCredential, deleteCredential, loadCredentialPolicy
 import { generateQR, pollQRStatus, passwordLogin, PLATFORM_NAMES, QR_PLATFORMS, PASSWORD_PLATFORMS } from './core/cloud-login';
 import { assessAllSources } from './core/credential-risk';
 import { generateTokenJson } from './core/credential-injector';
-import type { TVBoxConfig, SearchQuotaConfig, CloudPlatform, CloudCredential } from './core/types';
+import { formatLiveGroupsAsTxt } from './core/live-merger';
+import type { TVBoxConfig, SearchQuotaConfig, CloudPlatform, CloudCredential, TVBoxLiveGroup } from './core/types';
 import { mountChannelProbeRoutes } from './routes/channel-probe-admin';
 
 export interface AppDeps {
@@ -28,6 +29,27 @@ export interface AppDeps {
   triggerRefresh: () => Promise<void>;
   onCronIntervalChange?: (intervalMinutes: number) => void;
   enableChannelProbe?: boolean; // 仅 Node/Docker 入口启用
+}
+
+function isNativeLiveGroups(lives: unknown): lives is TVBoxLiveGroup[] {
+  if (!Array.isArray(lives)) return false;
+
+  return lives.every((live) => {
+    if (!live || typeof live !== 'object') return false;
+
+    const group = (live as { group?: unknown }).group;
+    const channels = (live as { channels?: unknown }).channels;
+    if (typeof group !== 'string' || !Array.isArray(channels)) return false;
+
+    return channels.every((channel) => {
+      if (!channel || typeof channel !== 'object') return false;
+      const name = (channel as { name?: unknown }).name;
+      const urls = (channel as { urls?: unknown }).urls;
+      return typeof name === 'string'
+        && Array.isArray(urls)
+        && urls.every((url) => typeof url === 'string');
+    });
+  });
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -62,9 +84,20 @@ export function createApp(deps: AppDeps): Hono {
 
     try {
       const full = JSON.parse(cached);
-      const liveConfig = { lives: full.lives || [] };
-      return c.body(JSON.stringify(liveConfig), 200, {
-        'Content-Type': 'application/json; charset=utf-8',
+      const lives = full.lives || [];
+
+      // CF 模式可能仍保留 FongMi live entries（type/url/api），此时保持旧 JSON 输出兼容。
+      if (!isNativeLiveGroups(lives)) {
+        const liveConfig = { lives };
+        return c.body(JSON.stringify(liveConfig), 200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'public, max-age=1800',
+          'Access-Control-Allow-Origin': '*',
+        });
+      }
+
+      return c.body(formatLiveGroupsAsTxt(lives), 200, {
+        'Content-Type': 'text/plain; charset=utf-8',
         'Cache-Control': 'public, max-age=1800',
         'Access-Control-Allow-Origin': '*',
       });
