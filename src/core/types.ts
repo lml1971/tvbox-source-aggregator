@@ -261,6 +261,25 @@ export interface ChannelSpeedEntry {
 }
 export type ChannelSpeedMap = Record<string, ChannelSpeedEntry>;
 
+// 站点验活健康记录
+export interface SiteHealthRecord {
+  key: string;
+  consecutiveFailures: number;
+  lastProbeTime: string;
+  lastProbeResult: 'ok' | 'empty' | 'error' | 'timeout';
+  lastSuccessTime?: string;
+}
+export type SiteHealthMap = Record<string, SiteHealthRecord>;
+
+// 正则黑名单规则
+export interface RegexRule {
+  id: string;
+  pattern: string;
+  field: 'name' | 'api' | 'key';
+  enabled: boolean;
+  createdAt: string;
+}
+
 // 频道测速任务状态
 export type ChannelProbeState = 'idle' | 'running' | 'done' | 'error';
 

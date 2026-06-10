@@ -3,23 +3,26 @@
 import { Hono } from 'hono';
 import type { Storage } from './storage/interface';
 import type { AppConfig, SourceEntry, MacCMSSourceEntry, LiveSourceEntry, NameTransformConfig, EdgeProxyConfig } from './core/types';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_AGG_LOGS, KV_BG_SETTINGS, KV_DEDUP_CONFIG } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_AGG_LOGS, KV_BG_SETTINGS, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, KV_SMART_BASE_URL_ENABLED, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_HEALTH_MAP } from './core/config';
+import { getRequestBaseUrl, applyBaseUrlPlaceholder, assertHostAllowed } from './core/base-url';
+import { logger } from './core/logger';
 import { loadGroupOrder, saveGroupOrder } from './core/group-order';
 import { parseConfigJson, isMultiRepoConfig, extractMultiRepoEntries } from './core/fetcher';
 import { decodeConfigResponse } from './core/decoder';
 import { validateMacCMS } from './core/maccms';
-import { lookupJarUrl, isMd5Key, base64ToUint8Array } from './core/jar-proxy';
+import { lookupJarUrl, isMd5Key, base64ToUint8Array, rewriteJarUrls } from './core/jar-proxy';
+import { BASE_URL_PLACEHOLDER } from './core/config';
 import { lookupLiveUrl } from './core/live-source';
 import { adminHtml } from './core/admin';
 import { dashboardHtml } from './core/dashboard';
 import { configEditorHtml } from './core/config-editor';
-import { siteFingerprint, loadBlacklist, saveBlacklist } from './core/blacklist';
+import { siteFingerprint, loadBlacklist, saveBlacklist, saveRegexRule, deleteRegexRule, updateRegexRule, validateRegexRule, testRegexAgainstSites, applyBlacklist } from './core/blacklist';
 import { loadSearchQuota, saveSearchQuota } from './core/search-quota';
 import { loadCredentials, saveCredential, deleteCredential, loadCredentialPolicy, saveCredentialPolicy } from './core/credential-store';
 import { generateQR, pollQRStatus, passwordLogin, PLATFORM_NAMES, QR_PLATFORMS, PASSWORD_PLATFORMS } from './core/cloud-login';
 import { assessAllSources } from './core/credential-risk';
 import { generateTokenJson } from './core/credential-injector';
-import { formatLiveGroupsAsTxt } from './core/live-merger';
+import { formatLiveGroupsAsTxt, fetchAndParseLiveUrls } from './core/live-merger';
 import type { TVBoxConfig, SearchQuotaConfig, CloudPlatform, CloudCredential, TVBoxLiveGroup } from './core/types';
 import { mountChannelProbeRoutes } from './routes/channel-probe-admin';
 
@@ -29,6 +32,7 @@ export interface AppDeps {
   triggerRefresh: () => Promise<void>;
   onCronIntervalChange?: (intervalMinutes: number) => void;
   enableChannelProbe?: boolean; // 仅 Node/Docker 入口启用
+  isSyncing?: () => boolean;
 }
 
 function isNativeLiveGroups(lives: unknown): lives is TVBoxLiveGroup[] {
@@ -56,9 +60,55 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const { storage, config } = deps;
 
+  // ─── 本地字体（仅 Node 侧）──────────────────────────────
+  if (!config.workerBaseUrl) {
+    const FONTS: Record<string, string> = {
+      'jetbrains-mono-latin-ext.woff2': 'font/woff2',
+      'jetbrains-mono-latin.woff2': 'font/woff2',
+      'outfit-latin-ext.woff2': 'font/woff2',
+      'outfit-latin.woff2': 'font/woff2',
+    };
+
+    app.get('/fonts/:name', async (c) => {
+      const name = c.req.param('name');
+      const contentType = FONTS[name];
+      if (!contentType) return c.text('Not Found', 404);
+      try {
+        const fs = await import('fs');
+        const path = await import('path');
+        const data = await fs.promises.readFile(path.join(__dirname, 'static/fonts', name));
+        return c.body(data, 200, {
+          'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        });
+      } catch {
+        return c.text('Not Found', 404);
+      }
+    });
+  }
+
+  // ─── 占位符替换辅助 ────────────────────────────────────
+  async function resolveBaseUrl(c: import('hono').Context): Promise<string | Response> {
+    const smartEnabled = (await storage.get(KV_SMART_BASE_URL_ENABLED)) === 'true';
+    const dmzEnabled = process.env.DMZ === '0';
+    const fallback = (config.localBaseUrl || '').replace(/\/$/, '');
+
+    if (config.workerBaseUrl) {
+      return config.workerBaseUrl.replace(/\/$/, '');
+    } else if (smartEnabled) {
+      const baseUrl = getRequestBaseUrl(c, fallback);
+      if (!assertHostAllowed(baseUrl, fallback, dmzEnabled)) {
+        logger.security('host-blocked', { host: baseUrl, fallback });
+        return c.json({ error: 'Non-LAN access denied. Set DMZ=0 to allow.' }, 403);
+      }
+      return baseUrl;
+    }
+    return fallback;
+  }
+
   // ─── 主配置 ────────────────────────────────────────────
   app.get('/', async (c) => {
-    const cached = await storage.get(KV_MERGED_CONFIG);
+    let cached = await storage.get(KV_MERGED_CONFIG);
 
     if (!cached) {
       return c.json(
@@ -66,6 +116,10 @@ export function createApp(deps: AppDeps): Hono {
         503,
       );
     }
+
+    const baseUrl = await resolveBaseUrl(c);
+    if (baseUrl instanceof Response) return baseUrl;
+    cached = applyBaseUrlPlaceholder(cached, baseUrl);
 
     return c.body(cached, 200, {
       'Content-Type': 'application/json; charset=utf-8',
@@ -76,22 +130,45 @@ export function createApp(deps: AppDeps): Hono {
 
   // ─── 纯直播配置 ────────────────────────────────────────
   app.get('/live-config', async (c) => {
-    const cached = await storage.get(KV_MERGED_CONFIG);
+    let cached = await storage.get(KV_MERGED_CONFIG);
 
     if (!cached) {
       return c.json({ error: 'No config available yet.' }, 503);
     }
 
+    const baseUrl = await resolveBaseUrl(c);
+    if (baseUrl instanceof Response) return baseUrl;
+    cached = applyBaseUrlPlaceholder(cached, baseUrl);
+
     try {
       const full = JSON.parse(cached);
       const lives = full.lives || [];
 
-      // CF 模式可能仍保留 FongMi live entries（type/url/api），此时保持旧 JSON 输出兼容。
+      // FongMi 格式（type/url/api 指针）：实时下载并解析为 txt 格式
       if (!isNativeLiveGroups(lives)) {
-        const liveConfig = { lives };
-        return c.body(JSON.stringify(liveConfig), 200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'public, max-age=1800',
+        const liveUrls: Array<{ name: string; url: string; header?: Record<string, string> }> = [];
+        for (const entry of lives) {
+          const url = entry.url || entry.api;
+          if (url && typeof url === 'string') {
+            liveUrls.push({ name: entry.name || url, url, header: entry.header });
+          }
+        }
+        if (liveUrls.length > 0) {
+          try {
+            const groups = await fetchAndParseLiveUrls(liveUrls, 8000);
+            if (groups.length > 0) {
+              return c.body(formatLiveGroupsAsTxt(groups), 200, {
+                'Content-Type': 'text/plain; charset=utf-8',
+                'Cache-Control': 'public, max-age=1800',
+                'Access-Control-Allow-Origin': '*',
+              });
+            }
+          } catch { /* fall through to JSON fallback */ }
+        }
+        // 无法解析时返回空 txt
+        return c.body('', 200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'public, max-age=300',
           'Access-Control-Allow-Origin': '*',
         });
       }
@@ -108,10 +185,13 @@ export function createApp(deps: AppDeps): Hono {
 
   // ─── .json 下载别名 ────────────────────────────────────
   app.get('/index.json', async (c) => {
-    const cached = await storage.get(KV_MERGED_CONFIG);
+    let cached = await storage.get(KV_MERGED_CONFIG);
     if (!cached) {
       return c.json({ error: 'No config available yet.' }, 503);
     }
+    const baseUrl = await resolveBaseUrl(c);
+    if (baseUrl instanceof Response) return baseUrl;
+    cached = applyBaseUrlPlaceholder(cached, baseUrl);
     return c.body(cached, 200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'public, max-age=1800',
@@ -121,10 +201,13 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get('/live.json', async (c) => {
-    const cached = await storage.get(KV_MERGED_CONFIG);
+    let cached = await storage.get(KV_MERGED_CONFIG);
     if (!cached) {
       return c.json({ error: 'No config available yet.' }, 503);
     }
+    const baseUrl = await resolveBaseUrl(c);
+    if (baseUrl instanceof Response) return baseUrl;
+    cached = applyBaseUrlPlaceholder(cached, baseUrl);
     try {
       const full = JSON.parse(cached);
       const liveConfig = { lives: full.lives || [] };
@@ -1279,6 +1362,14 @@ export function createApp(deps: AppDeps): Hono {
     const parseSet = new Set(blacklist.parses);
     const liveSet = new Set(blacklist.lives);
 
+    // 预编译正则规则用于标记 regexBlocked
+    const activeRegexRules = blacklist.regexRules.filter(r => r.enabled);
+    const compiledRegex: Array<{ re: RegExp; field: string }> = [];
+    for (const rule of activeRegexRules) {
+      try { compiledRegex.push({ re: new RegExp(rule.pattern, 'i'), field: rule.field }); } catch { /* skip */ }
+    }
+    const overrideSet = new Set(blacklist.regexBlockOverrides);
+
     // Build sites with fingerprint + blocked status + group
     const sites = [];
     for (const site of parsed.sites || []) {
@@ -1290,7 +1381,16 @@ export function createApp(deps: AppDeps): Hono {
       } else if (api.startsWith('http')) {
         try { group = '远程: ' + new URL(api).hostname; } catch { group = '远程源'; }
       }
-      sites.push({ ...site, fingerprint: fp, blocked: siteSet.has(fp), group });
+      const fpBlocked = siteSet.has(fp);
+      let regexBlocked = false;
+      let regexPattern = '';
+      if (!fpBlocked && !overrideSet.has(site.name || '')) {
+        for (const { re, field } of compiledRegex) {
+          const value = String((site as unknown as Record<string, unknown>)[field] || '');
+          if (re.test(value)) { regexBlocked = true; regexPattern = re.source; break; }
+        }
+      }
+      sites.push({ ...site, fingerprint: fp, blocked: fpBlocked || regexBlocked, regexBlocked, regexPattern, group });
     }
 
     const parses = (parsed.parses || []).map(p => ({
@@ -1330,6 +1430,7 @@ export function createApp(deps: AppDeps): Hono {
       list.push(id);
     }
     await saveBlacklist(storage, blacklist);
+    await patchMergedConfig();
 
     return c.json({ success: true });
   });
@@ -1367,6 +1468,7 @@ export function createApp(deps: AppDeps): Hono {
       }
     }
     await saveBlacklist(storage, blacklist);
+    await patchMergedConfig();
 
     return c.json({ success: true, added });
   });
@@ -1393,8 +1495,114 @@ export function createApp(deps: AppDeps): Hono {
     const key = type as keyof typeof blacklist;
     (blacklist[key] as string[]) = (blacklist[key] as string[]).filter((v: string) => v !== id);
     await saveBlacklist(storage, blacklist);
+    await patchMergedConfig();
 
     return c.json({ success: true });
+  });
+
+  // ─── 黑名单变更后实时 patch merged_config ──────────────
+  async function patchMergedConfig(): Promise<void> {
+    const fullRaw = await storage.get(KV_MERGED_CONFIG_FULL);
+    if (!fullRaw) return;
+    const blacklist = await loadBlacklist(storage);
+    const hasBlacklist = blacklist.sites.length > 0 || blacklist.parses.length > 0 || blacklist.lives.length > 0 || blacklist.regexRules.some(r => r.enabled);
+
+    let result: TVBoxConfig;
+    if (!hasBlacklist) {
+      result = JSON.parse(fullRaw);
+    } else {
+      const fullConfig: TVBoxConfig = JSON.parse(fullRaw);
+      const { config: filtered } = await applyBlacklist(fullConfig, blacklist);
+      result = filtered;
+    }
+
+    // 保留当前已合并的 Native lives（避免回退到 FongMi 格式）
+    const currentRaw = await storage.get(KV_MERGED_CONFIG);
+    if (currentRaw) {
+      try {
+        const current: TVBoxConfig = JSON.parse(currentRaw);
+        if (Array.isArray(current.lives) && current.lives.length > 0 && current.lives[0]?.group) {
+          result.lives = current.lives;
+        }
+      } catch { /* ignore parse error */ }
+    }
+
+    // 重新应用 JAR proxy rewrite（与 aggregator Step 7 一致）
+    result = await rewriteJarUrls(result, BASE_URL_PLACEHOLDER, storage);
+    await storage.put(KV_MERGED_CONFIG, JSON.stringify(result));
+  }
+
+  // ─── 正则黑名单 ─────────────────────────────────────────
+  app.get('/admin/blacklist/regex', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const blacklist = await loadBlacklist(storage);
+    return c.json({ rules: blacklist.regexRules, overrides: blacklist.regexBlockOverrides });
+  });
+
+  app.post('/admin/blacklist/regex', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    if (deps.isSyncing?.()) return c.json({ error: 'Aggregation in progress, try later' }, 409);
+    const body = await c.req.json<{ pattern: string; field: 'name' | 'api' | 'key'; enabled?: boolean }>();
+    if (!body.pattern || !['name', 'api', 'key'].includes(body.field)) {
+      return c.json({ error: 'Invalid input: pattern and field (name|api|key) required' }, 400);
+    }
+    const validation = validateRegexRule(body.pattern);
+    if (!validation.ok) return c.json({ error: validation.error }, 400);
+    const rule = {
+      id: crypto.randomUUID().slice(0, 8),
+      pattern: body.pattern,
+      field: body.field,
+      enabled: body.enabled !== false,
+      createdAt: new Date().toISOString(),
+    };
+    const blacklist = await loadBlacklist(storage);
+    await saveRegexRule(storage, blacklist, rule);
+    await patchMergedConfig();
+    return c.json({ success: true, rule });
+  });
+
+  app.put('/admin/blacklist/regex/:id', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    if (deps.isSyncing?.()) return c.json({ error: 'Aggregation in progress, try later' }, 409);
+    const id = c.req.param('id');
+    const body = await c.req.json<{ pattern?: string; field?: 'name' | 'api' | 'key'; enabled?: boolean }>();
+    if (body.pattern) {
+      const validation = validateRegexRule(body.pattern);
+      if (!validation.ok) return c.json({ error: validation.error }, 400);
+    }
+    if (body.field && !['name', 'api', 'key'].includes(body.field)) {
+      return c.json({ error: 'Invalid field' }, 400);
+    }
+    const blacklist = await loadBlacklist(storage);
+    if (!blacklist.regexRules.find(r => r.id === id)) return c.json({ error: 'Rule not found' }, 404);
+    await updateRegexRule(storage, blacklist, id, body);
+    await patchMergedConfig();
+    return c.json({ success: true });
+  });
+
+  app.delete('/admin/blacklist/regex/:id', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const id = c.req.param('id');
+    const blacklist = await loadBlacklist(storage);
+    if (!blacklist.regexRules.find(r => r.id === id)) return c.json({ error: 'Rule not found' }, 404);
+    await deleteRegexRule(storage, blacklist, id);
+    await patchMergedConfig();
+    return c.json({ success: true });
+  });
+
+  app.post('/admin/blacklist/regex/test', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const body = await c.req.json<{ pattern: string; field: 'name' | 'api' | 'key' }>();
+    if (!body.pattern || !['name', 'api', 'key'].includes(body.field)) {
+      return c.json({ error: 'Invalid input' }, 400);
+    }
+    const validation = validateRegexRule(body.pattern);
+    if (!validation.ok) return c.json({ error: validation.error }, 400);
+    const raw = await storage.get(KV_MERGED_CONFIG_FULL);
+    if (!raw) return c.json({ matched: [] });
+    const fullConfig: TVBoxConfig = JSON.parse(raw);
+    const result = testRegexAgainstSites(fullConfig.sites || [], body.pattern, body.field);
+    return c.json(result);
   });
 
   // ─── 聚合日志 ──────────────────────────────────────────
@@ -1533,10 +1741,166 @@ export function createApp(deps: AppDeps): Hono {
     }
   });
 
+  // ─── 直播禁用开关 ─────────────────────────────────────────
+  app.get('/admin/live-disabled', async (c) => {
+    const raw = await storage.get(KV_LIVE_DISABLED);
+    return c.json({ disabled: raw === 'true' });
+  });
+
+  app.put('/admin/live-disabled', async (c) => {
+    if (config.adminToken) {
+      const auth = c.req.raw.headers.get('Authorization');
+      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
+    }
+    if (deps.isSyncing?.()) {
+      return c.json({ error: 'Aggregation in progress, try later' }, 409);
+    }
+    const body = await c.req.json<{ disabled: boolean }>();
+    await storage.put(KV_LIVE_DISABLED, body.disabled ? 'true' : 'false');
+    return c.json({ success: true, disabled: body.disabled });
+  });
+
+  // ─── 直播合并模式 ─────────────────────────────────────────
+  app.get('/admin/live-merge-mode', async (c) => {
+    const raw = await storage.get(KV_LIVE_MERGE_MODE);
+    return c.json({ mode: raw || 'separated' });
+  });
+
+  app.put('/admin/live-merge-mode', async (c) => {
+    if (config.adminToken) {
+      const auth = c.req.raw.headers.get('Authorization');
+      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
+    }
+    if (deps.isSyncing?.()) {
+      return c.json({ error: 'Aggregation in progress, try later' }, 409);
+    }
+    const body = await c.req.json<{ mode: string }>();
+    const mode = body.mode === 'merged' ? 'merged' : 'separated';
+    await storage.put(KV_LIVE_MERGE_MODE, mode);
+    try { await deps.triggerRefresh(); } catch { /* best effort */ }
+    return c.json({ success: true, mode });
+  });
+
+  // ─── 智能 Base URL 开关 ──────────────────────────────────
+  app.get('/admin/smart-base-url', async (c) => {
+    const raw = await storage.get(KV_SMART_BASE_URL_ENABLED);
+    return c.json({ enabled: raw === 'true' });
+  });
+
+  app.put('/admin/smart-base-url', async (c) => {
+    if (config.adminToken) {
+      const auth = c.req.raw.headers.get('Authorization');
+      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const body = await c.req.json<{ enabled: boolean }>();
+    await storage.put(KV_SMART_BASE_URL_ENABLED, body.enabled ? 'true' : 'false');
+    return c.json({ success: true, enabled: body.enabled });
+  });
+
+  // ─── 站点验活设置 ───────────────────────────────────────
+  app.get('/admin/site-probe-depth', async (c) => {
+    const raw = await storage.get(KV_SITE_PROBE_DEPTH);
+    return c.json({ depth: raw || 'deep' });
+  });
+
+  app.put('/admin/site-probe-depth', async (c) => {
+    if (config.adminToken) {
+      const auth = c.req.raw.headers.get('Authorization');
+      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const body = await c.req.json<{ depth: 'shallow' | 'deep' }>();
+    if (!['shallow', 'deep'].includes(body.depth)) return c.json({ error: 'Invalid depth' }, 400);
+    await storage.put(KV_SITE_PROBE_DEPTH, body.depth);
+    return c.json({ success: true, depth: body.depth });
+  });
+
+  app.get('/admin/site-auto-clean', async (c) => {
+    const raw = await storage.get(KV_SITE_AUTO_CLEAN);
+    return c.json({ enabled: raw === 'true' });
+  });
+
+  app.put('/admin/site-auto-clean', async (c) => {
+    if (config.adminToken) {
+      const auth = c.req.raw.headers.get('Authorization');
+      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const body = await c.req.json<{ enabled: boolean }>();
+    await storage.put(KV_SITE_AUTO_CLEAN, body.enabled ? 'true' : 'false');
+    return c.json({ success: true, enabled: body.enabled });
+  });
+
+  app.get('/admin/site-health', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const raw = await storage.get(KV_SITE_HEALTH_MAP);
+    const healthMap = raw ? JSON.parse(raw) : {};
+    return c.json(healthMap);
+  });
+
   // 频道级测速 admin 路由（仅 Node/Docker 启用）
   if (deps.enableChannelProbe) {
     mountChannelProbeRoutes(app, { storage, config });
   }
+
+  // ─── 图片代理（供 reader 漫画阅读器使用）─────────────────
+  app.get('/img-proxy', async (c) => {
+    const url = c.req.query('url');
+    if (!url) return c.text('missing url', 400);
+
+    const referer = c.req.query('referer') || new URL(url).origin + '/';
+
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': referer,
+          'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+      });
+
+      if (!resp.ok) return c.body(null, resp.status as 502);
+
+      return new Response(resp.body, {
+        headers: {
+          'Content-Type': resp.headers.get('content-type') || 'image/jpeg',
+          'Cache-Control': 'public, max-age=86400',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    } catch {
+      return c.body(null, 502);
+    }
+  });
+
+  // ─── Reader 通用代理（无 auth，供 reader 后端中转被封站点）──
+  app.get('/reader-proxy', async (c) => {
+    const url = c.req.query('url');
+    if (!url) return c.text('missing url', 400);
+
+    const referer = c.req.query('referer') || new URL(url).origin + '/';
+    const cookie = c.req.query('cookie') || '';
+
+    const headers: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+      'Referer': referer,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    };
+    if (cookie) headers['Cookie'] = cookie;
+
+    try {
+      const resp = await fetch(url, { headers });
+
+      return new Response(resp.body, {
+        status: resp.status,
+        headers: {
+          'Content-Type': resp.headers.get('content-type') || 'text/plain',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    } catch {
+      return c.body(null, 502);
+    }
+  });
 
   return app;
 }

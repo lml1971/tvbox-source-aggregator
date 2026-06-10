@@ -280,9 +280,10 @@ ${sharedStyles}
 
   <!-- Tabs -->
   <div class="tabs">
-    <div class="tab active" data-tab="sites" onclick="switchTab('sites')">Sites <span class="badge" id="badgeSites">0</span></div>
-    <div class="tab" data-tab="parses" onclick="switchTab('parses')">Parses <span class="badge" id="badgeParses">0</span></div>
-    <div class="tab" data-tab="lives" onclick="switchTab('lives')">Lives <span class="badge" id="badgeLives">0</span></div>
+    <div class="tab active" data-tab="sites" onclick="switchTab('sites')"><span data-i18n="sites">Sites</span> <span class="badge" id="badgeSites">0</span></div>
+    <div class="tab" data-tab="parses" onclick="switchTab('parses')"><span data-i18n="parses">Parses</span> <span class="badge" id="badgeParses">0</span></div>
+    <div class="tab" data-tab="lives" onclick="switchTab('lives')"><span data-i18n="lives">Lives</span> <span class="badge" id="badgeLives">0</span></div>
+    <div class="tab" data-tab="regex" onclick="switchTab('regex')"><span data-i18n="regexTab">Regex Rules</span> <span class="badge" id="badgeRegex">0</span></div>
   </div>
 
   <!-- Search -->
@@ -306,6 +307,23 @@ ${sharedStyles}
   <!-- Lives panel -->
   <div class="tab-panel" id="panelLives">
     <div class="loading-msg" id="loadingLives" data-i18n="loading">加载中...</div>
+  </div>
+
+  <!-- Regex Rules panel -->
+  <div class="tab-panel" id="panelRegex">
+    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="regexPattern" class="search-bar-input" placeholder="Regex pattern (e.g. 测试|广告)" style="flex:1;min-width:180px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-family:var(--mono);font-size:0.85rem">
+      <select id="regexField" style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:0.85rem">
+        <option value="name">name</option>
+        <option value="api">api</option>
+        <option value="key">key</option>
+      </select>
+      <button class="btn" onclick="addRegexRule()" style="padding:8px 16px">Add</button>
+      <button class="btn secondary" onclick="testRegexRule()" style="padding:8px 16px">Test</button>
+    </div>
+    <div id="regexTestResult" style="font-size:0.85rem;margin-bottom:12px;color:var(--text-dim);display:none"></div>
+    <div id="regexRulesList"></div>
+    <div class="loading-msg" id="loadingRegex" style="display:none">No regex rules configured</div>
   </div>
 
   <div class="footer">
@@ -348,6 +366,10 @@ const _translations = {
     selectAll:'Select all',
     batchBlock:'Batch Block', batchSelected:'selected', batchCancel:'Cancel',
     typePrefix:'Type ',
+    regexTab:'Regex Rules',
+    regexDelete:'Delete', regexNoRules:'No regex rules. Add a pattern above to auto-block matching sites.',
+    regexMatches:' sites would be blocked: ', regexNoMatch:'No matches found', regexError:'Error: ',
+    regexTesting:'Testing...',
     footer:'TVBox Config Editor &middot; Blacklisted items are excluded from aggregated output',
   },
   zh: {
@@ -374,6 +396,10 @@ const _translations = {
     selectAll:'全选',
     batchBlock:'批量屏蔽', batchSelected:'已选', batchCancel:'取消',
     typePrefix:'类型 ',
+    regexTab:'正则规则',
+    regexDelete:'删除', regexNoRules:'暂无正则规则，在上方添加规则可批量自动屏蔽匹配的站点',
+    regexMatches:'个站点将被屏蔽：', regexNoMatch:'未匹配到任何站点', regexError:'错误：',
+    regexTesting:'测试中...',
     footer:'TVBox 配置编辑器 &middot; 被屏蔽的项目不会出现在聚合输出中',
   }
 };
@@ -718,6 +744,70 @@ async function batchBlock() {
     document.querySelectorAll('.group-check:checked').forEach(cb => { cb.checked = false; });
   } catch (e) { alert('Network error'); }
 }
+
+// ─── Regex Rules ──────────────
+async function loadRegexRules() {
+  try {
+    const r = await fetch('/admin/blacklist/regex', { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+    const d = await r.json();
+    const el = document.getElementById('regexRulesList');
+    const badge = document.getElementById('badgeRegex');
+    if (!d.rules || d.rules.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-dim);padding:12px">' + _t('regexNoRules') + '</div>';
+      badge.textContent = '0';
+      return;
+    }
+    badge.textContent = String(d.rules.length);
+    el.innerHTML = d.rules.map(function(rule) {
+      var qid = rule.id.replace(/"/g, '&quot;');
+      return '<div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--surface)">' +
+        '<code style="flex:1;font-size:0.85rem;color:var(--text)">' + esc(rule.pattern) + '</code>' +
+        '<span style="font-size:0.75rem;padding:2px 6px;border-radius:4px;background:var(--surface-2);color:var(--text-dim)">' + rule.field + '</span>' +
+        '<label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" ' + (rule.enabled?'checked':'') + ' onchange="toggleRegexRule(&quot;' + qid + '&quot;,this.checked)"></label>' +
+        '<button class="btn sm secondary" onclick="deleteRegexRule(&quot;' + qid + '&quot;)" style="padding:4px 8px;font-size:0.75rem">' + _t('regexDelete') + '</button>' +
+      '</div>';
+    }).join('');
+  } catch(e) { console.error('loadRegexRules', e); }
+}
+async function addRegexRule() {
+  var pattern = document.getElementById('regexPattern').value.trim();
+  var field = document.getElementById('regexField').value;
+  if (!pattern) return;
+  var r = await fetch('/admin/blacklist/regex', { method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN}, body: JSON.stringify({pattern:pattern, field:field, enabled:true}) });
+  var d = await r.json();
+  if (d.error) { alert(d.error); return; }
+  document.getElementById('regexPattern').value = '';
+  loadRegexRules();
+}
+async function deleteRegexRule(id) {
+  await fetch('/admin/blacklist/regex/' + id, { method:'DELETE', headers:{'Authorization':'Bearer '+TOKEN} });
+  loadRegexRules();
+}
+async function toggleRegexRule(id, enabled) {
+  await fetch('/admin/blacklist/regex/' + id, { method:'PUT', headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN}, body: JSON.stringify({enabled:enabled}) });
+  loadRegexRules();
+}
+async function testRegexRule() {
+  var pattern = document.getElementById('regexPattern').value.trim();
+  var field = document.getElementById('regexField').value;
+  if (!pattern) return;
+  var el = document.getElementById('regexTestResult');
+  el.style.display = 'block';
+  el.textContent = _t('regexTesting');
+  var r = await fetch('/admin/blacklist/regex/test', { method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN}, body: JSON.stringify({pattern:pattern, field:field}) });
+  var d = await r.json();
+  if (d.error) { el.textContent = _t('regexError') + d.error; el.style.color = 'var(--red)'; return; }
+  el.style.color = 'var(--text-dim)';
+  if (!d.matched || d.matched.length === 0) { el.textContent = _t('regexNoMatch'); return; }
+  el.textContent = d.matched.length + _t('regexMatches') + d.matched.slice(0,8).map(function(m){return m.name}).join(', ') + (d.matched.length > 8 ? ' ...' : '');
+}
+
+// Load regex on tab switch
+var _origSwitchTab = switchTab;
+switchTab = function(tab) {
+  _origSwitchTab(tab);
+  if (tab === 'regex') loadRegexRules();
+};
 
 applyTheme(getTheme());
 initThemeDropdown();

@@ -1,16 +1,16 @@
 // 聚合流程编排
 
 import type { Storage } from './storage/interface';
-import type { AppConfig, SourceEntry, SourcedConfig, MacCMSSourceEntry, SourceFetchResult, SourceHealthRecord, AggregationLog, AggLogFailedSource, AggLogSiteChange } from './core/types';
+import type { AppConfig, SourceEntry, SourcedConfig, MacCMSSourceEntry, SourceFetchResult, SourceHealthRecord, AggregationLog, AggLogFailedSource, AggLogSiteChange, TVBoxSite } from './core/types';
 import { fetchConfigs } from './core/fetcher';
 import { mergeConfigs, cleanLocalRefs, cleanEmptyEntries } from './core/merger';
-import { batchSiteSpeedTest, appendSpeedToName, filterUnreachableSites } from './core/speedtest';
+import { batchSiteSpeedTest, appendSpeedToName, filterUnreachableSites, type SiteProbeResult } from './core/speedtest';
 import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
-import { mergeLivesToNative, type LiveSourceInput } from './core/live-merger';
+import { mergeLivesToNative, separatedMergeLives, type LiveSourceInput } from './core/live-merger';
 import { loadSpeedMap as loadChannelSpeedMap } from './core/channel-probe';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_DEDUP_CONFIG } from './core/config';
-import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist } from './core/blacklist';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN } from './core/config';
+import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, siteFingerprint } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson, type FetchProxyConfig } from './core/fetcher';
 import { scrapeSourceList, scrapeMacCMSSources, type ScrapeSourceConfig, type ScrapeMacCMSConfig } from './core/source-scraper';
@@ -20,19 +20,20 @@ import { loadCredentialPolicy } from './core/credential-store';
 import { injectCredentials } from './core/credential-injector';
 import { loadGroupOrder, applyGroupOrder } from './core/group-order';
 import { deduplicateSimilarNames } from './core/dedup';
+import { logger } from './core/logger';
 import type { NameTransformConfig, EdgeProxyConfig } from './core/types';
 
 export async function runAggregation(storage: Storage, config: AppConfig): Promise<void> {
   const startTime = Date.now();
-  console.log('[aggregation] Starting...');
+  logger.info('aggregation', 'Starting...');
 
   try {
     await _runAggregation(storage, config, startTime);
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     const stack = error instanceof Error ? error.stack : '';
-    console.error(`[aggregation] FATAL ERROR: ${msg}`);
-    console.error(`[aggregation] Stack: ${stack}`);
+    logger.error('aggregation', `FATAL ERROR: ${msg}`);
+    logger.error('aggregation', `Stack: ${stack}`);
     // 写入错误信息方便调试
     await storage.put(KV_LAST_UPDATE, `ERROR @ ${new Date().toISOString()}: ${msg}`);
 
@@ -70,11 +71,11 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   const snapshotRaw = await storage.get(KV_SITE_SNAPSHOT);
   const prevSiteKeys: Set<string> = snapshotRaw ? new Set(JSON.parse(snapshotRaw)) : new Set();
 
-  // Step 0: 自动抓取源（需配置 SCRAPE_SOURCE_URL 环境变量）
-  if (config.scrapeSourceUrl && config.scrapeSourceReferer) {
-    console.log('[aggregation] Step 0: Auto-scraping sources...');
+  // Step 0: 自动抓取源（需配置 SCRAPE_SOURCE_URL 环境变量，referer 可选）
+  if (config.scrapeSourceUrl) {
+    logger.info('aggregation', 'Step 0: Auto-scraping sources...');
     try {
-      const scrapeCfg: ScrapeSourceConfig = { url: config.scrapeSourceUrl, referer: config.scrapeSourceReferer };
+      const scrapeCfg: ScrapeSourceConfig = { url: config.scrapeSourceUrl, referer: config.scrapeSourceReferer || '' };
       const scraped = await scrapeSourceList(scrapeCfg);
       if (scraped.length > 0) {
         const existingRaw = await storage.get(KV_MANUAL_SOURCES);
@@ -92,35 +93,35 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
 
         if (added > 0) {
           await storage.put(KV_MANUAL_SOURCES, JSON.stringify(existingSources));
-          console.log(`[aggregation] Auto-scraped: ${added} new sources added (total: ${existingSources.length})`);
+          logger.infoFields('aggregation', 'auto-scrape-added', { added, total: existingSources.length });
         } else {
-          console.log(`[aggregation] Auto-scrape: no new sources (${scraped.length} scraped, all exist)`);
+          logger.infoFields('aggregation', 'auto-scrape-none-new', { scraped: scraped.length });
         }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[aggregation] Auto-scrape failed (non-blocking): ${msg}`);
+      logger.warn('aggregation', `Auto-scrape failed (non-blocking): ${msg}`);
     }
   }
 
   // Step 0.5: MacCMS 资源站自动抓取（需配置 MACCMS_API_URL 环境变量）
   if (config.maccmsApiUrl && config.maccmsAesKey && config.maccmsAesIv) {
-    console.log('[aggregation] Step 0.5: Auto-scraping MacCMS sources...');
+    logger.info('aggregation', 'Step 0.5: Auto-scraping MacCMS sources...');
     try {
       const maccmsCfg: ScrapeMacCMSConfig = { apiUrl: config.maccmsApiUrl, aesKey: config.maccmsAesKey, aesIv: config.maccmsAesIv };
       const scraped = await scrapeMacCMSSources(maccmsCfg);
       if (scraped.length > 0) {
         await storage.put(KV_MACCMS_SOURCES, JSON.stringify(scraped));
-        console.log(`[aggregation] MacCMS auto-scraped: ${scraped.length} sources updated`);
+        logger.infoFields('aggregation', 'maccms-auto-scraped', { count: scraped.length });
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[aggregation] MacCMS auto-scrape failed (non-blocking): ${msg}`);
+      logger.warn('aggregation', `MacCMS auto-scrape failed (non-blocking): ${msg}`);
     }
   }
 
   // Step 1: 读取手动配置的源（含自动抓取合并后的）
-  console.log('[aggregation] Step 1: Loading sources...');
+  logger.info('aggregation', 'Step 1: Loading sources...');
   const raw = await storage.get(KV_MANUAL_SOURCES);
   const sources: SourceEntry[] = raw ? JSON.parse(raw) : [];
 
@@ -129,15 +130,15 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   const hasMacCMS = macCMSRaw ? JSON.parse(macCMSRaw).length > 0 : false;
 
   if (sources.length === 0 && !hasMacCMS) {
-    console.warn('[aggregation] No sources configured, nothing to do');
+    logger.warn('aggregation', 'No sources configured, nothing to do');
     return;
   }
 
-  console.log(`[aggregation] ${sources.length} config sources configured`);
+  logger.infoFields('aggregation', 'sources-loaded', { count: sources.length });
   await storage.put(KV_SOURCE_URLS, JSON.stringify(sources));
 
   // Step 1.5: 处理 MacCMS 源
-  console.log('[aggregation] Step 1.5: Processing MacCMS sources...');
+  logger.info('aggregation', 'Step 1.5: Processing MacCMS sources...');
   const macCMSConfigs = await processMacCMSSources(storage, config);
 
   // Step 1.6: 直播源频道级合并移至 Step 6.5（方案 D+）
@@ -154,17 +155,17 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       const parsed = parseConfigJson(raw);
       if (parsed) {
         inlineConfigs.push({ sourceUrl: src.url, sourceName: src.name || 'Inline', config: parsed });
-        console.log(`[aggregation] Loaded inline config: ${kvKey}`);
+        logger.info('aggregation', `Loaded inline config: ${kvKey}`);
       } else {
-        console.warn(`[aggregation] Failed to parse inline config: ${kvKey}`);
+        logger.warn('aggregation', `Failed to parse inline config: ${kvKey}`);
       }
     } else {
-      console.warn(`[aggregation] Inline config not found in KV: ${kvKey}`);
+      logger.warn('aggregation', `Inline config not found in KV: ${kvKey}`);
     }
   }
 
   // Step 2: 批量 fetch 配置 JSON（本地模式可通过边缘代理回退）
-  console.log('[aggregation] Step 2: Fetching configs...');
+  logger.info('aggregation', 'Step 2: Fetching configs...');
   let proxyConfig: FetchProxyConfig | undefined;
   if (!config.workerBaseUrl) {
     // 本地模式：读取边缘代理配置
@@ -176,7 +177,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       if (edge.vercel) urls.push(`${edge.vercel}/api/proxy`);
       if (urls.length > 0) {
         proxyConfig = { urls, token: config.adminToken };
-        console.log(`[aggregation] Edge proxies configured: ${urls.join(', ')}`);
+        logger.info('aggregation', `Edge proxies configured: ${urls.join(', ')}`);
       }
     }
   }
@@ -187,7 +188,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   await updateSourceHealth(storage, fetchResults);
 
   if (sourcedConfigs.length === 0 && inlineConfigs.length === 0 && macCMSConfigs.length === 0) {
-    console.warn('[aggregation] No valid configs fetched and no MacCMS/inline sources, keeping previous cache');
+    logger.warn('aggregation', 'No valid configs fetched and no MacCMS/inline sources, keeping previous cache');
     return;
   }
 
@@ -196,35 +197,35 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
 
   const configsWithSpeed = sourcedConfigs.filter((c) => c.speedMs != null);
   if (configsWithSpeed.length > 0) {
-    console.log('[aggregation] Step 3: Filtering configs by fetch speed...');
+    logger.info('aggregation', 'Step 3: Filtering configs by fetch speed...');
     filteredConfigs = sourcedConfigs.filter((c) => {
       if (c.speedMs == null) return true; // 没有测速数据的保留
       if (c.speedMs <= config.speedTimeoutMs) return true;
-      console.log(`[aggregation] Filtered out ${c.sourceUrl}: ${c.speedMs}ms > ${config.speedTimeoutMs}ms`);
+      logger.infoFields('aggregation', 'speed-filter-removed', { url: c.sourceUrl, speedMs: c.speedMs, threshold: config.speedTimeoutMs });
       return false;
     });
 
     if (filteredConfigs.length === 0) {
-      console.warn('[aggregation] All configs failed speed filter, using all fetched configs');
+      logger.warn('aggregation', 'All configs failed speed filter, using all fetched configs');
       filteredConfigs = sourcedConfigs;
     } else {
-      console.log(`[aggregation] ${filteredConfigs.length}/${sourcedConfigs.length} configs passed speed filter`);
+      logger.infoFields('aggregation', 'speed-filter-passed', { passed: filteredConfigs.length, total: sourcedConfigs.length });
     }
   } else {
-    console.log('[aggregation] Step 3: No speed data available, skipping filter');
+    logger.info('aggregation', 'Step 3: No speed data available, skipping filter');
   }
 
   // Step 4: 合并（包含 MacCMS 源，投票制 spider 分配）
-  console.log('[aggregation] Step 4: Merging configs...');
+  logger.info('aggregation', 'Step 4: Merging configs...');
   const allConfigs = [...filteredConfigs, ...inlineConfigs, ...macCMSConfigs];
   const mergeResult = mergeConfigs(allConfigs);
   let merged = mergeResult.config;
   const siteSourceMap = mergeResult.siteSourceMap;
 
   // Step 4.5: 黑名单过滤
-  console.log('[aggregation] Step 4.5: Applying blacklist...');
+  logger.info('aggregation', 'Step 4.5: Applying blacklist...');
   const blacklist = await loadBlacklist(storage);
-  const hasBlacklist = blacklist.sites.length > 0 || blacklist.parses.length > 0 || blacklist.lives.length > 0;
+  const hasBlacklist = blacklist.sites.length > 0 || blacklist.parses.length > 0 || blacklist.lives.length > 0 || blacklist.regexRules.some(r => r.enabled);
 
   // 保存过滤前的完整配置（供配置编辑器显示已屏蔽项）
   await storage.put(KV_MERGED_CONFIG_FULL, JSON.stringify(merged));
@@ -236,18 +237,18 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       await saveBlacklist(storage, pruned);
     }
 
-    const { config: filtered, removedSites, removedParses, removedLives } = await applyBlacklist(merged, pruned);
+    const { config: filtered, removedSites, removedParses, removedLives, removedByRegex } = await applyBlacklist(merged, pruned);
     merged = filtered;
     logBlacklistRemovedSites = removedSites;
     logBlacklistRemovedParses = removedParses;
     logBlacklistRemovedLives = removedLives;
-    console.log(`[aggregation] Blacklist removed: ${removedSites} sites, ${removedParses} parses, ${removedLives} lives`);
+    logger.infoFields('aggregation', 'blacklist-removed', { sites: removedSites, parses: removedParses, lives: removedLives, regex: removedByRegex });
   } else {
-    console.log('[aggregation] Step 4.5: No blacklist entries, skipping');
+    logger.info('aggregation', 'Step 4.5: No blacklist entries, skipping');
   }
 
   // Step 4.6: 清洗无效数据（空条目 + 本地引用）— 必须在搜索配额前，避免配额分给随后被清理的站点
-  console.log('[aggregation] Step 4.6: Cleaning invalid entries...');
+  logger.info('aggregation', 'Step 4.6: Cleaning invalid entries...');
   merged = cleanEmptyEntries(merged);
   merged = cleanLocalRefs(merged);
 
@@ -256,11 +257,10 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   if (merged.sites) {
     const { sites: quotaSites, quotaReport } = applySearchQuota(merged.sites, quotaConfig, siteSourceMap);
     merged.sites = quotaSites;
-    console.log(
-      `[aggregation] Step 4.7: Search quota: ${quotaReport.totalSites} sites, ` +
-      `${quotaReport.jsExcluded} JS excluded, ${quotaReport.pinnedCount} pinned, ` +
-      `${quotaReport.truncated} truncated → ${quotaReport.searchable} searchable`
-    );
+    logger.infoFields('aggregation', 'search-quota', {
+      total: quotaReport.totalSites, jsExcluded: quotaReport.jsExcluded,
+      pinned: quotaReport.pinnedCount, truncated: quotaReport.truncated, searchable: quotaReport.searchable,
+    });
     await storage.put(KV_SEARCH_QUOTA_REPORT, JSON.stringify({
       updatedAt: new Date().toISOString(),
       ...quotaReport,
@@ -272,59 +272,65 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   const nameTransform: NameTransformConfig = ntRaw ? JSON.parse(ntRaw) : {};
   const hasTransform = nameTransform.prefix || nameTransform.suffix || nameTransform.promoReplacement || nameTransform.extraCleanPatterns?.length;
   if (hasTransform) {
-    console.log('[aggregation] Step 5.5: Applying name transform...');
+    logger.info('aggregation', 'Step 5.5: Applying name transform...');
     merged = transformSiteNames(merged, nameTransform);
   } else {
     // 即使没有自定义配置，默认清洗推广文字也要执行
-    console.log('[aggregation] Step 5.5: Cleaning promo text from site names...');
+    logger.info('aggregation', 'Step 5.5: Cleaning promo text from site names...');
     merged = transformSiteNames(merged, {});
   }
 
   // Step 5.7: 网盘凭证注入
   const credentials = await loadCredentials(storage);
   if (credentials.size > 0 && merged.sites && merged.sites.length > 0) {
-    console.log('[aggregation] Step 5.7: Injecting cloud credentials...');
+    logger.info('aggregation', 'Step 5.7: Injecting cloud credentials...');
     const credentialPolicy = await loadCredentialPolicy(storage);
     const jarBaseUrl = config.workerBaseUrl || config.localBaseUrl;
     const { sites: injectedSites, report: injReport } = injectCredentials(
       merged.sites, credentials, credentialPolicy, jarBaseUrl,
     );
     merged.sites = injectedSites;
-    console.log(
-      `[aggregation] Credentials: ${injReport.injected} injected, ` +
-      `${injReport.skippedSafe} not needed, ` +
-      `${injReport.skippedHighRisk} high-risk blocked, ` +
-      `${injReport.skippedUnaudited} unaudited blocked, ` +
-      `${injReport.skippedNoRule} no rule, ` +
-      `${injReport.skippedNoCredential} no credential`,
-    );
+    logger.infoFields('aggregation', 'credentials-injected', {
+      injected: injReport.injected, skippedSafe: injReport.skippedSafe,
+      highRisk: injReport.skippedHighRisk, unaudited: injReport.skippedUnaudited,
+      noRule: injReport.skippedNoRule, noCredential: injReport.skippedNoCredential,
+    });
   } else {
-    console.log('[aggregation] Step 5.7: No cloud credentials configured, skipping');
+    logger.info('aggregation', 'Step 5.7: No cloud credentials configured, skipping');
   }
 
-  // Step 6: 站点测速 + 不可达过滤 + name 标记（CF 和 Node.js 统一）
+  // Step 6: 站点验活 + 不可达过滤 + name 标记（CF 和 Node.js 统一）
   const speedTestRaw = await storage.get(KV_SPEED_TEST_ENABLED);
-  const speedTestEnabled = speedTestRaw !== 'false'; // 默认启用
+  const speedTestEnabled = speedTestRaw !== 'false';
+  const probeDepthRaw = await storage.get(KV_SITE_PROBE_DEPTH);
+  const probeDeep = probeDepthRaw !== 'shallow' && !config.workerBaseUrl; // CF Worker 强制 shallow
+  let siteProbeMap: Map<string, SiteProbeResult> = new Map();
   let siteSpeedMap: Map<string, number | null> = new Map();
 
   if (!speedTestEnabled) {
-    console.log('[aggregation] Step 6: Speed test disabled, skipping');
+    logger.info('aggregation', 'Step 6: Speed test disabled, skipping');
   } else if (merged.sites && merged.sites.length > 0) {
-    console.log('[aggregation] Step 6: Site speed test + unreachable filtering...');
-    siteSpeedMap = await batchSiteSpeedTest(merged.sites, config.siteTimeoutMs);
+    logger.infoFields('aggregation', 'Step 6: site probe', { depth: probeDeep ? 'deep' : 'shallow' });
+    siteProbeMap = await batchSiteSpeedTest(merged.sites, config.siteTimeoutMs, probeDeep);
 
-    if (siteSpeedMap.size > 0) {
-      // 过滤不可达站点（含安全阀）
-      const { sites: filteredSites, filtered } = filterUnreachableSites(merged.sites, siteSpeedMap);
+    // 提取纯 speedMs map 供后续 dedup 使用
+    for (const [key, probe] of siteProbeMap) {
+      siteSpeedMap.set(key, probe.speedMs);
+    }
+
+    if (siteProbeMap.size > 0) {
+      const { sites: filteredSites, filtered } = filterUnreachableSites(merged.sites, siteProbeMap);
       merged.sites = filteredSites;
 
-      // 本地模式追加延迟标签到站点名称
       if (!config.workerBaseUrl) {
-        merged.sites = appendSpeedToName(merged.sites, siteSpeedMap);
+        merged.sites = appendSpeedToName(merged.sites, siteProbeMap);
       }
     }
+
+    // 更新站点健康状态 & 自动标记/屏蔽
+    await updateSiteHealth(storage, siteProbeMap, merged);
   } else {
-    console.log('[aggregation] Step 6: No sites to test');
+    logger.info('aggregation', 'Step 6: No sites to test');
   }
 
   // Step 6.2: 相似名称去重（保留响应速度最快的站点）
@@ -342,11 +348,11 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   }
 
   if (similarDedupEnabled && merged.sites && merged.sites.length > 0) {
-    console.log(`[aggregation] Step 6.2: Similar-name dedup (threshold: ${similarDedupThreshold})...`);
+    logger.infoFields('aggregation', 'Step 6.2: similar-name-dedup', { threshold: similarDedupThreshold });
     merged.sites = deduplicateSimilarNames(merged.sites, siteSpeedMap, similarDedupThreshold);
-    console.log(`[aggregation] After similar dedup: ${merged.sites.length} sites`);
+    logger.infoFields('aggregation', 'similar-dedup-done', { sites: merged.sites.length });
   } else {
-    console.log('[aggregation] Step 6.2: Similar-name dedup disabled, skipping');
+    logger.info('aggregation', 'Step 6.2: Similar-name dedup disabled, skipping');
   }
 
   // Step 6.5: 直播源频道级合并（方案 D+）
@@ -354,10 +360,17 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   // → 下载 → 解析 → 按频道名合并 urls → 输出 TVBoxLiveGroup[]
   // CF Worker 免费版 50 子请求上限，Step 6.5 要再下载 N 个 m3u 会爆，整段跳过
   // CF 部署保留 FongMi 格式，lives[0] 崩溃风险保留；建议 CF 用户切 Docker
-  if (config.workerBaseUrl) {
-    console.log('[aggregation] Step 6.5: Skipped on CF (subrequest limit, use Docker for channel merging)');
+  // 直播禁用开关
+  const liveDisabledRaw = await storage.get(KV_LIVE_DISABLED);
+  const liveDisabled = liveDisabledRaw === 'true';
+
+  if (liveDisabled) {
+    logger.info('aggregation', 'Step 6.5: Live disabled, skipping');
+    merged.lives = [];
+  } else if (config.workerBaseUrl) {
+    logger.info('aggregation', 'Step 6.5: Skipped on CF (subrequest limit, use Docker for channel merging)');
   } else {
-  console.log('[aggregation] Step 6.5: Channel-level live merging...');
+  logger.info('aggregation', 'Step 6.5: Channel-level live merging...');
   {
     const liveInputs: LiveSourceInput[] = [];
 
@@ -400,24 +413,28 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     });
 
     if (uniqueInputs.length === 0) {
-      console.log('[aggregation] Step 6.5: No live sources to merge');
+      logger.info('aggregation', 'Step 6.5: No live sources to merge');
       merged.lives = [];
     } else {
-      console.log(`[aggregation] Step 6.5: ${uniqueInputs.length} unique live source URLs`);
+      const liveMergeMode = (await storage.get(KV_LIVE_MERGE_MODE)) || 'separated';
+      logger.infoFields('aggregation', 'Step 6.5: live-sources', { unique: uniqueInputs.length, mode: liveMergeMode });
 
-      // 加载频道级测速缓存（仅 Node/Docker 有）
-      const channelSpeedMap = await loadChannelSpeedMap(storage);
-
-      const mergeResult = await mergeLivesToNative(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap);
+      let mergeResult;
+      if (liveMergeMode === 'separated') {
+        mergeResult = await separatedMergeLives(uniqueInputs, config.fetchTimeoutMs);
+      } else {
+        const channelSpeedMap = await loadChannelSpeedMap(storage);
+        mergeResult = await mergeLivesToNative(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap);
+      }
       merged.lives = mergeResult.groups;
 
       // 保存合并树供 channel-probe 使用
       await storage.put(KV_CHANNEL_MERGED_TREE, JSON.stringify(mergeResult.groups));
 
-      console.log(
-        `[aggregation] Step 6.5: ${mergeResult.sourcesDownloaded}/${uniqueInputs.length} sources OK, ` +
-        `${mergeResult.groups.length} groups, ${mergeResult.totalChannels} channels, ${mergeResult.totalUrls} URLs`,
-      );
+      logger.infoFields('aggregation', 'live-merge-done', {
+        downloaded: mergeResult.sourcesDownloaded, total: uniqueInputs.length,
+        groups: mergeResult.groups.length, channels: mergeResult.totalChannels, urls: mergeResult.totalUrls,
+      });
     }
   }
   }
@@ -425,34 +442,30 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   // Step 6.8: 自定义分组排序
   const groupOrderCfg = await loadGroupOrder(storage);
   if (groupOrderCfg.enabled && merged.sites && merged.sites.length > 0) {
-    console.log('[aggregation] Step 6.8: Applying custom group order...');
+    logger.info('aggregation', 'Step 6.8: Applying custom group order...');
     merged.sites = applyGroupOrder(merged.sites, groupOrderCfg);
   } else {
-    console.log('[aggregation] Step 6.8: Group order disabled or no rules, skipping');
+    logger.info('aggregation', 'Step 6.8: Group order disabled or no rules, skipping');
   }
 
-  // Step 7: JAR URL 改写（CF 用 workerBaseUrl，本地用 localBaseUrl）
-  const jarBaseUrl = config.workerBaseUrl || config.localBaseUrl;
-  if (jarBaseUrl) {
-    console.log(`[aggregation] Step 7: Rewriting JAR URLs for proxy (${jarBaseUrl})...`);
-    merged = await rewriteJarUrls(merged, jarBaseUrl, storage);
-  } else {
-    console.log('[aggregation] Step 7: Skipping JAR rewrite (no base URL)');
-  }
+  // Step 7: JAR URL 改写（统一用占位符，请求时替换为实际 base URL）
+  logger.infoFields('aggregation', 'Step 7: rewriting JAR URLs', { placeholder: BASE_URL_PLACEHOLDER });
+  merged = await rewriteJarUrls(merged, BASE_URL_PLACEHOLDER, storage);
 
-  // Step 7.5: 注入图片代理前缀（CF 模式用自身，本地模式用边缘代理）
-  if (config.workerBaseUrl) {
-    merged.pic = `${config.workerBaseUrl.replace(/\/$/, '')}/img/`;
-    console.log(`[aggregation] Step 7.5: Injected pic proxy: ${merged.pic}`);
-  } else {
-    const edgeRaw = await storage.get(KV_EDGE_PROXIES);
-    if (edgeRaw) {
-      const edge: EdgeProxyConfig = JSON.parse(edgeRaw);
-      if (edge.cf) {
-        merged.pic = `${edge.cf.replace(/\/$/, '')}/img/`;
-        console.log(`[aggregation] Step 7.5: Injected pic proxy via edge: ${merged.pic}`);
-      }
+  // Step 7.5: 注入图片代理前缀（统一用占位符或边缘代理）
+  const edgeRaw = await storage.get(KV_EDGE_PROXIES);
+  if (edgeRaw) {
+    const edge: EdgeProxyConfig = JSON.parse(edgeRaw);
+    if (edge.cf) {
+      merged.pic = `${edge.cf.replace(/\/$/, '')}/img/`;
+      logger.infoFields('aggregation', 'pic-proxy-injected-edge', { pic: merged.pic });
+    } else {
+      merged.pic = `${BASE_URL_PLACEHOLDER}/img/`;
+      logger.infoFields('aggregation', 'pic-proxy-placeholder', { pic: merged.pic });
     }
+  } else {
+    merged.pic = `${BASE_URL_PLACEHOLDER}/img/`;
+    logger.infoFields('aggregation', 'pic-proxy-placeholder', { pic: merged.pic });
   }
 
   // Step 8: 存入存储
@@ -461,10 +474,9 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   await storage.put(KV_LAST_UPDATE, new Date().toISOString());
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(
-    `[aggregation] Done in ${elapsed}s. ` +
-      `${merged.sites?.length} sites, ${merged.parses?.length} parses, ${merged.lives?.length} lives`,
-  );
+  logger.infoFields('aggregation', 'done', {
+    elapsed: `${elapsed}s`, sites: merged.sites?.length, parses: merged.parses?.length, lives: merged.lives?.length,
+  });
 
   // Step 9: 聚合日志
   const nowSiteKeys = new Set((merged.sites || []).map(s => s.key));
@@ -511,9 +523,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   await storage.put(KV_SITE_SNAPSHOT, JSON.stringify([...nowSiteKeys]));
 
   if (addedSites.length > 0 || removedSites.length > 0) {
-    console.log(
-      `[aggregation] Site diff: +${addedSites.length} added, -${removedSites.length} removed`,
-    );
+    logger.infoFields('aggregation', 'site-diff', { added: addedSites.length, removed: removedSites.length });
   }
 }
 
@@ -530,11 +540,11 @@ async function processMacCMSSources(
   const entries: MacCMSSourceEntry[] = raw ? JSON.parse(raw) : [];
 
   if (entries.length === 0) {
-    console.log('[aggregation] No MacCMS sources configured');
+    logger.info('aggregation', 'No MacCMS sources configured');
     return [];
   }
 
-  console.log(`[aggregation] ${entries.length} MacCMS sources found`);
+  logger.infoFields('aggregation', 'maccms-sources-found', { count: entries.length });
 
   let validEntries: MacCMSSourceEntry[];
   let speedMap: Map<string, number> | undefined;
@@ -543,24 +553,23 @@ async function processMacCMSSources(
 
   if (config.workerBaseUrl || edgeProxiesRaw) {
     // CF 版或本地有 edge proxy：跳过验证，运行时代理兜底
-    console.log(`[aggregation] Skipping MacCMS validation (${config.workerBaseUrl ? 'CF proxy' : 'edge proxy configured'})`);
+    logger.info('aggregation', `Skipping MacCMS validation (${config.workerBaseUrl ? 'CF proxy' : 'edge proxy configured'})`);
     validEntries = entries;
   } else {
     // 本地版无 edge proxy：并发验证，过滤不可达站点
-    console.log('[aggregation] Local mode (no edge proxy): validating MacCMS sources...');
+    logger.info('aggregation', 'Local mode (no edge proxy): validating MacCMS sources...');
     const result = await processMacCMSForLocal(entries, config.siteTimeoutMs);
     validEntries = result.passed;
     speedMap = result.speedMap;
   }
 
   if (validEntries.length === 0) {
-    console.warn('[aggregation] No valid MacCMS sources after processing');
+    logger.warn('aggregation', 'No valid MacCMS sources after processing');
     return [];
   }
 
-  const proxyBaseUrl = config.workerBaseUrl || config.localBaseUrl;
-  const sites = macCMSToTVBoxSites(validEntries, proxyBaseUrl, speedMap);
-  console.log(`[aggregation] Converted ${sites.length} MacCMS sources to TVBoxSites`);
+  const sites = macCMSToTVBoxSites(validEntries, BASE_URL_PLACEHOLDER, speedMap);
+  logger.infoFields('aggregation', 'maccms-converted', { sites: sites.length });
 
   return [{
     sourceUrl: 'maccms://builtin',
@@ -623,10 +632,77 @@ async function updateSourceHealth(storage: Storage, fetchResults: SourceFetchRes
 
   const failCount = newRecords.filter(r => r.consecutiveFailures > 0).length;
   if (failCount > 0) {
-    console.log(`[aggregation] Source health: ${newRecords.length - failCount} ok, ${failCount} failing`);
+    logger.infoFields('aggregation', 'source-health', { ok: newRecords.length - failCount, failing: failCount });
   }
 
   await storage.put(KV_SOURCE_HEALTH, JSON.stringify(newRecords));
+}
+
+async function updateSiteHealth(
+  storage: Storage,
+  probeMap: Map<string, SiteProbeResult>,
+  merged: { sites?: TVBoxSite[] },
+): Promise<void> {
+  if (probeMap.size === 0) return;
+
+  const raw = await storage.get(KV_SITE_HEALTH_MAP);
+  const healthMap: Record<string, { consecutiveFailures: number; lastProbeTime: string; lastProbeResult: string; lastSuccessTime?: string }> = raw ? JSON.parse(raw) : {};
+  const now = new Date().toISOString();
+
+  for (const [key, probe] of probeMap) {
+    const prev = healthMap[key];
+    if (probe.result === 'ok') {
+      healthMap[key] = { consecutiveFailures: 0, lastProbeTime: now, lastProbeResult: 'ok', lastSuccessTime: now };
+    } else {
+      healthMap[key] = {
+        consecutiveFailures: (prev?.consecutiveFailures ?? 0) + 1,
+        lastProbeTime: now,
+        lastProbeResult: probe.result,
+        lastSuccessTime: prev?.lastSuccessTime,
+      };
+    }
+  }
+
+  // 标记连续失败 >= 3 的站点
+  if (merged.sites) {
+    for (let i = 0; i < merged.sites.length; i++) {
+      const h = healthMap[merged.sites[i].key];
+      if (h && h.consecutiveFailures >= 3) {
+        const name = merged.sites[i].name || merged.sites[i].key;
+        if (!name.includes('[⚠]')) {
+          merged.sites[i] = { ...merged.sites[i], name: `${name} [⚠]` };
+        }
+      }
+    }
+  }
+
+  // 自动清理：连续失败 >= 5 时加黑名单（需开关开启）
+  const autoCleanRaw = await storage.get(KV_SITE_AUTO_CLEAN);
+  if (autoCleanRaw === 'true' && merged.sites) {
+    const blacklist = await loadBlacklist(storage);
+    let cleaned = 0;
+    const MAX_AUTO_CLEAN = 5;
+
+    for (const site of merged.sites) {
+      if (cleaned >= MAX_AUTO_CLEAN) break;
+      const h = healthMap[site.key];
+      if (h && h.consecutiveFailures >= 5) {
+        const fp = await siteFingerprint(site);
+        if (!blacklist.sites.includes(fp)) {
+          blacklist.sites.push(fp);
+          cleaned++;
+          logger.infoFields('aggregation', 'auto-clean-blacklisted', { key: site.key, name: site.name, failures: h.consecutiveFailures });
+        }
+      }
+    }
+
+    if (cleaned > 0) {
+      await saveBlacklist(storage, blacklist);
+      logger.infoFields('aggregation', 'auto-clean-done', { cleaned });
+    }
+  }
+
+  await storage.put(KV_SITE_HEALTH_MAP, JSON.stringify(healthMap));
 }
 
 async function appendAggLog(storage: Storage, log: AggregationLog): Promise<void> {
@@ -640,6 +716,6 @@ async function appendAggLog(storage: Storage, log: AggregationLog): Promise<void
     await storage.put(KV_AGG_LOGS, JSON.stringify(logs));
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[aggregation] Failed to write agg log: ${msg}`);
+    logger.warn('aggregation', `Failed to write agg log: ${msg}`);
   }
 }

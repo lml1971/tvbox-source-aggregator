@@ -6,6 +6,7 @@
     "dev:cf": "wrangler dev",
     "deploy": "wrangler deploy",
     "build:node": "node scripts/build.js",
+    "build:apk": "node scripts/build-apk.js",
     "start": "node scripts/start.js",
     "types": "wrangler types"
   },

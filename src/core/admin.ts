@@ -397,6 +397,31 @@ ${sharedStyles}
       </div>
       <div id="channelProbeStatus" style="font-size:0.85rem;color:var(--text-secondary);line-height:1.6"></div>
     </div>
+
+    <!-- Live Disable Toggle -->
+    <div class="section">
+      <div class="section-title" data-i18n="liveToggleTitle">Live Feature Toggle</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="liveDisabledCheck" onchange="saveLiveDisabled()">
+          <span data-i18n="liveToggleLabel">Disable live aggregation (skip live merge, output empty lives)</span>
+        </label>
+        <span class="status-text" id="liveDisabledStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+    </div>
+
+    <!-- Live Merge Mode -->
+    <div class="section">
+      <div class="section-title">直播合并模式</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button id="liveMergeSeparated" class="btn btn-sm active" onclick="setLiveMergeMode('separated')">📂 分离模式（按源分类）</button>
+        <button id="liveMergeMerged" class="btn btn-sm" onclick="setLiveMergeMode('merged')">🔀 合并模式（去重混合）</button>
+        <span class="status-text" id="liveMergeModeStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:4px">
+        分离模式：每个直播源独立展示，用「源名」前缀区分。合并模式：所有源的频道按名称去重合并为统一列表。
+      </div>
+    </div>
   </div>
 
   <!-- Search Quota Tab -->
@@ -608,6 +633,39 @@ ${sharedStyles}
         <span class="status-text" id="bgStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
       </div>
     </div>
+
+    <!-- 智能 Base URL -->
+    <div class="section">
+      <div class="section-title" data-i18n="smartBaseUrlTitle">Smart Base URL</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="smartBaseUrlCheck" onchange="saveSmartBaseUrl()">
+          <span data-i18n="smartBaseUrlLabel">Auto-detect client host for JAR/image URLs (LAN only, set DMZ=0 to allow public)</span>
+        </label>
+        <span class="status-text" id="smartBaseUrlStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+    </div>
+
+    <!-- 站点验活 -->
+    <div class="section">
+      <div class="section-title" data-i18n="siteProbeTitle">Site Probe &amp; Auto Clean</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label class="form-label" style="margin:0" data-i18n="probeDepthLabel">Probe depth:</label>
+        <select id="probeDepthSelect" class="nt-input" style="width:auto;min-width:140px" onchange="saveProbeDepth()">
+          <option value="deep" data-i18n-text="probeDeep">Deep (validate content)</option>
+          <option value="shallow" data-i18n-text="probeShallow">Shallow (HTTP only)</option>
+        </select>
+        <span class="status-text" id="probeDepthStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="autoCleanCheck" onchange="saveAutoClean()">
+          <span data-i18n="autoCleanLabel">Auto-blacklist after 5 consecutive failures (max 5/run)</span>
+        </label>
+        <span class="status-text" id="autoCleanStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div style="margin-top:6px;font-size:0.8rem;color:var(--text-dim)" data-i18n="siteProbeDesc">Deep mode checks type0/type1 content validity. Failed sites get [⚠] marker after 3 failures.</div>
+    </div>
   </div>
 
   <!-- Agg Logs Tab -->
@@ -699,6 +757,12 @@ const translations = {
     channelProbeChannels:'Channels', channelProbeDuration:'Duration', channelProbeFinished:'Finished at',
     channelProbeStarted:'Probe started', channelProbeDisabledFirst:'Enable probe first', channelProbeAlreadyRunning:'Already running',
     channelProbeCfOnly:'Only Node/Docker supports channel probing',
+    liveToggleTitle:'Live Feature Toggle', liveToggleLabel:'Disable live aggregation (skip live merge, output empty lives)',
+    smartBaseUrlTitle:'Smart Base URL', smartBaseUrlLabel:'Auto-detect client host for JAR/image URLs (LAN only, set DMZ=0 to allow public)',
+    siteProbeTitle:'Site Probe & Auto Clean', probeDepthLabel:'Probe depth:',
+    probeDeep:'Deep (validate content)', probeShallow:'Shallow (HTTP only)',
+    autoCleanLabel:'Auto-blacklist after 5 consecutive failures (max 5/run)',
+    siteProbeDesc:'Deep mode checks type0/type1 content validity. Failed sites get [⚠] marker after 3 failures.',
     footer:'TVBox Source Aggregator &middot; Admin Console',
   },
   zh: {
@@ -769,6 +833,12 @@ const translations = {
     channelProbeChannels:'频道数', channelProbeDuration:'耗时', channelProbeFinished:'完成时间',
     channelProbeStarted:'测速已启动', channelProbeDisabledFirst:'请先启用测速', channelProbeAlreadyRunning:'已在运行',
     channelProbeCfOnly:'仅 Node/Docker 支持频道级测速',
+    liveToggleTitle:'直播功能', liveToggleLabel:'禁用直播聚合（跳过直播合并，输出空 lives）',
+    smartBaseUrlTitle:'智能地址响应', smartBaseUrlLabel:'根据客户端访问地址自动生成资源链接（仅局域网，设置 DMZ=0 允许公网）',
+    siteProbeTitle:'站点验活与自动清理', probeDepthLabel:'验活深度：',
+    probeDeep:'深度（验证内容有效性）', probeShallow:'浅层（仅 HTTP 可达）',
+    autoCleanLabel:'连续失败 5 次自动屏蔽（每次最多 5 个）',
+    siteProbeDesc:'深度模式会检查 type0/type1 站点是否返回有效内容。连续失败 3 次的站点会被标记 [⚠]。',
     footer:'TVBox 源聚合器 &middot; 管理控制台',
   }
 };
@@ -2041,6 +2111,96 @@ async function clearAggLogs() {
   await auth.authFetch('/admin/agg-logs', { method: 'DELETE' });
   loadAggLogs();
 }
+
+// ─── 直播禁用 ──────────────
+async function loadLiveDisabled() {
+  try {
+    const r = await auth.authFetch('/admin/live-disabled');
+    const d = await r.json();
+    $('liveDisabledCheck').checked = d.disabled;
+  } catch {}
+}
+async function saveLiveDisabled() {
+  const disabled = $('liveDisabledCheck').checked;
+  await auth.authFetch('/admin/live-disabled', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({disabled}) });
+  $('liveDisabledStatus').textContent = '✓';
+  setTimeout(() => $('liveDisabledStatus').textContent = '', 2000);
+}
+
+// ─── 直播合并模式 ──────────
+async function loadLiveMergeMode() {
+  try {
+    const r = await auth.authFetch('/admin/live-merge-mode');
+    const d = await r.json();
+    const mode = d.mode || 'separated';
+    $('liveMergeSeparated').classList.toggle('active', mode === 'separated');
+    $('liveMergeMerged').classList.toggle('active', mode === 'merged');
+  } catch {}
+}
+async function setLiveMergeMode(mode) {
+  $('liveMergeSeparated').classList.toggle('active', mode === 'separated');
+  $('liveMergeMerged').classList.toggle('active', mode === 'merged');
+  $('liveMergeModeStatus').textContent = '⏳';
+  try {
+    await auth.authFetch('/admin/live-merge-mode', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode}) });
+    $('liveMergeModeStatus').textContent = '✓ 已切换并刷新';
+    setTimeout(() => $('liveMergeModeStatus').textContent = '', 3000);
+  } catch(e) {
+    $('liveMergeModeStatus').textContent = '✗ 失败';
+  }
+}
+
+// ─── 智能 Base URL ──────────
+async function loadSmartBaseUrl() {
+  try {
+    const r = await auth.authFetch('/admin/smart-base-url');
+    const d = await r.json();
+    $('smartBaseUrlCheck').checked = d.enabled;
+  } catch {}
+}
+async function saveSmartBaseUrl() {
+  const enabled = $('smartBaseUrlCheck').checked;
+  await auth.authFetch('/admin/smart-base-url', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+  $('smartBaseUrlStatus').textContent = '✓';
+  setTimeout(() => $('smartBaseUrlStatus').textContent = '', 2000);
+}
+
+// ─── 验活深度 ────────────────
+async function loadProbeDepth() {
+  try {
+    const r = await auth.authFetch('/admin/site-probe-depth');
+    const d = await r.json();
+    $('probeDepthSelect').value = d.depth || 'deep';
+  } catch {}
+}
+async function saveProbeDepth() {
+  const depth = $('probeDepthSelect').value;
+  await auth.authFetch('/admin/site-probe-depth', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({depth}) });
+  $('probeDepthStatus').textContent = '✓';
+  setTimeout(() => $('probeDepthStatus').textContent = '', 2000);
+}
+
+// ─── 自动清理 ────────────────
+async function loadAutoClean() {
+  try {
+    const r = await auth.authFetch('/admin/site-auto-clean');
+    const d = await r.json();
+    $('autoCleanCheck').checked = d.enabled;
+  } catch {}
+}
+async function saveAutoClean() {
+  const enabled = $('autoCleanCheck').checked;
+  await auth.authFetch('/admin/site-auto-clean', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+  $('autoCleanStatus').textContent = '✓';
+  setTimeout(() => $('autoCleanStatus').textContent = '', 2000);
+}
+
+// ─── Init new settings ───────
+loadLiveDisabled();
+loadLiveMergeMode();
+loadSmartBaseUrl();
+loadProbeDepth();
+loadAutoClean();
 
 applyTheme(getTheme());
 initThemeDropdown();

@@ -11,7 +11,7 @@ RUN npm run build:node
 
 FROM node:20-alpine
 
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache python3 make g++ tzdata
 
 WORKDIR /app
 COPY package*.json ./
@@ -25,6 +25,7 @@ VOLUME /app/data
 
 ENV PORT=5678
 ENV DATA_DIR=/app/data
+ENV TZ=Asia/Shanghai
 EXPOSE 5678
 
 CMD ["node", "dist/server.js"]

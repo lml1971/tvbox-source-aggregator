@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="TVBox 聚合服务器"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:paddingBottom="4dp" />
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="● 已停止"
+            android:textSize="16sp"
+            android:paddingBottom="16dp" />
+
+        <Button
+            android:id="@+id/btToggle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="启动服务" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="TVBox 客户端填入下面的地址："
+            android:textSize="14sp"
+            android:paddingTop="20dp" />
+
+        <TextView
+            android:id="@+id/tvAddress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="—"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textIsSelectable="true"
+            android:paddingTop="4dp"
+            android:paddingBottom="8dp" />
+
+        <ImageView
+            android:id="@+id/ivQr"
+            android:layout_width="200dp"
+            android:layout_height="200dp"
+            android:layout_gravity="center_horizontal"
+            android:visibility="gone"
+            android:contentDescription="源地址二维码" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="管理密码 (ADMIN_TOKEN)："
+            android:textSize="14sp"
+            android:paddingTop="20dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingTop="4dp"
+            android:paddingBottom="16dp">
+
+            <TextView
+                android:id="@+id/tvToken"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="—"
+                android:textSize="16sp"
+                android:textIsSelectable="true"
+                android:fontFamily="monospace" />
+
+            <Button
+                android:id="@+id/btEditToken"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="修改"
+                style="?android:attr/buttonBarButtonStyle" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btAdmin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="打开管理后台" />
+
+        <Button
+            android:id="@+id/btBattery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="加入电池白名单（保持后台运行）"
+            android:layout_marginTop="8dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="提示：把手机插上电、关闭省电策略、在路由器给本机绑定固定 IP，可长期当源服务器。"
+            android:textSize="12sp"
+            android:paddingTop="20dp"
+            android:alpha="0.6" />
+
+    </LinearLayout>
+</ScrollView>

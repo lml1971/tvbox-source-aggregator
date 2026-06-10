@@ -46,37 +46,77 @@ export async function scrapeSourceList(cfg: ScrapeSourceConfig): Promise<SourceE
 }
 
 async function fetchPage(cfg: ScrapeSourceConfig, page: number): Promise<string> {
-  const resp = await fetch(cfg.url, {
+  // 先尝试旧版 POST（WordPress AJAX 分页 API）
+  const postResp = await fetch(cfg.url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'User-Agent': 'okhttp/3.12.0',
-      'Referer': cfg.referer,
+      'Referer': cfg.referer || cfg.url,
       'X-Requested-With': 'XMLHttpRequest',
     },
     body: `action=load&page=source&type=one&paged=${page}`,
   });
 
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.text();
+  if (postResp.ok) return postResp.text();
+
+  // POST 失败（网站改版）：GET 获取完整页面（仅第 1 页，新版不分页）
+  if (page > 1) return '';
+  const getResp = await fetch(cfg.url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      'Referer': cfg.referer || cfg.url,
+    },
+  });
+  if (!getResp.ok) throw new Error(`HTTP ${getResp.status}`);
+  return getResp.text();
 }
 
 function parsePage(html: string): SourceEntry[] {
   const sources: SourceEntry[] = [];
+  const seen = new Set<string>();
+
+  // 策略 1：旧版结构（col-form-label + value）
   const nameRegex = /col-form-label">([^<]+)</g;
   const urlRegex = /value="([^"]+)"/g;
-
   const names: string[] = [];
   const urls: string[] = [];
-
   let m;
   while ((m = nameRegex.exec(html)) !== null) names.push(m[1].trim());
   while ((m = urlRegex.exec(html)) !== null) urls.push(m[1].trim());
-
   for (let i = 0; i < names.length && i < urls.length; i++) {
     const url = urls[i];
-    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+    if (url && (url.startsWith('http://') || url.startsWith('https://')) && !seen.has(url)) {
+      seen.add(url);
       sources.push({ name: names[i], url });
+    }
+  }
+
+  // 策略 2：新版结构——直接提取页面中所有看起来像 TVBox 配置的 URL
+  if (sources.length === 0) {
+    const urlPattern = /https?:\/\/[^\s"'<>]+?\.(json|txt)(?=[^\w]|$)/g;
+    while ((m = urlPattern.exec(html)) !== null) {
+      let url = m[0];
+      // 排除 xhztv.pro/jsonview 这类预览链接（只要里面的实际源 URL）
+      if (url.includes('jsonview?url=')) continue;
+      // 排除静态资源
+      if (/\.(css|js|png|jpg|gif|svg|ico)/.test(url)) continue;
+      if (!seen.has(url)) {
+        seen.add(url);
+        // 从 URL 尾部提取一个可读名称
+        const name = decodeURIComponent(url.split('/').pop()?.replace(/\.(json|txt)$/, '') || url.slice(-20));
+        sources.push({ name, url });
+      }
+    }
+    // 也提取多仓/影视仓类地址（无扩展名但路径含 tv/box/api 等）
+    const specialPattern = /https?:\/\/[^\s"'<>]+?(?:\/tv|\/api|影视仓)[^\s"'<>]*/g;
+    while ((m = specialPattern.exec(html)) !== null) {
+      const url = m[0].replace(/["'<>].*$/, '');
+      if (!seen.has(url) && !url.includes('jsonview')) {
+        seen.add(url);
+        const name = decodeURIComponent(url.split('/').pop() || '多仓');
+        sources.push({ name, url });
+      }
     }
   }
 

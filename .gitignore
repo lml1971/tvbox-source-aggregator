@@ -6,7 +6,22 @@ data/
 .env
 .DS_Store
 
+# Android (APK 形态)
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+android/release.keystore
+android/.idea/
+android/captures/
+# build:apk 生成的运行时资产（由 dist/ 组装）
+android/app/src/main/assets/nodejs-project/
+# nodejs-mobile 预编译库（116MB，用 scripts/fetch-libnode.sh 重新下载）
+android/app/libnode/bin/
+
 # Claude Code
 .claude/memory/
 .claude/feedback/
 dev-log/
+.claude/.needs-review

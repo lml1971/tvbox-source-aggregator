@@ -21,8 +21,12 @@ import {
 import type { Storage } from './storage/interface';
 import type { AppConfig } from './core/types';
 
-// 加载 .env
-dotenv.config();
+// 加载 .env（嵌入式/无文件系统环境下容错：nodejs-mobile 无 .env，依赖注入的环境变量）
+try {
+  dotenv.config();
+} catch {
+  // 忽略：无 .env 或文件系统受限时，回退到已注入的 process.env
+}
 
 // ─── 存储初始化（SQLite → JSON 降级）───────────────────
 
@@ -182,6 +186,7 @@ async function main() {
     config,
     triggerRefresh: runWithGuard,
     enableChannelProbe: true,
+    isSyncing: () => refreshRunning,
     onCronIntervalChange: (intervalMinutes: number) => {
       const newCron = intervalToCron(intervalMinutes);
       console.log(`[cron] Interval changed to ${intervalLabel(intervalMinutes)} (${newCron})`);

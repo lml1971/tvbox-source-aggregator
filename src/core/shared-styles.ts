@@ -1,6 +1,15 @@
 // Shared CSS across admin, dashboard, config-editor pages
-export const sharedStyles = `
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Outfit:wght@300;400;600;700&display=swap');
+
+const LOCAL_FONT_FACE = `
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:300 700;font-display:swap;src:url('/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');unicode-range:U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:300 700;font-display:swap;src:url('/fonts/jetbrains-mono-latin.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'Outfit';font-style:normal;font-weight:300 700;font-display:swap;src:url('/fonts/outfit-latin-ext.woff2') format('woff2');unicode-range:U+0100-02AF,U+0304,U+0308,U+0329,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:'Outfit';font-style:normal;font-weight:300 700;font-display:swap;src:url('/fonts/outfit-latin.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+`;
+
+const CDN_FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Outfit:wght@300;400;600;700&display=swap');`;
+
+const sharedStylesBody = `
 
 *{margin:0;padding:0;box-sizing:border-box}
 
@@ -815,3 +824,12 @@ body::before{
   100%{background-position:-200% 0}
 }
 `;
+
+export function getSharedStyles(isWorker: boolean): string {
+  return (isWorker ? CDN_FONT_IMPORT : LOCAL_FONT_FACE) + sharedStylesBody;
+}
+
+// 默认导出（CF Worker 用 CDN，Node 用本地字体）
+// 判断：typeof process !== 'undefined' 说明在 Node 环境
+const isNodeEnv = typeof process !== 'undefined' && !!process.versions?.node;
+export const sharedStyles = (isNodeEnv ? LOCAL_FONT_FACE : CDN_FONT_IMPORT) + sharedStylesBody;
