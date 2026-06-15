@@ -91,6 +91,9 @@ export const KV_SITE_HEALTH_MAP = 'site_health_map';
 export const KV_SITE_PROBE_DEPTH = 'site_probe_depth'; // 'shallow' | 'deep'
 export const KV_SITE_AUTO_CLEAN = 'site_auto_clean';   // 'true' | 'false'
 
+// Builder 源追踪
+export const KV_SOURCE_MAP = 'builder_source_map'; // { sites: Record, parses: Record, lives: Record }
+
 // 频道测速 cron：每 12 小时
 export const CHANNEL_PROBE_CRON = '0 */12 * * *';
 // 并发与超时

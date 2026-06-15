@@ -186,6 +186,7 @@ async function main() {
     config,
     triggerRefresh: runWithGuard,
     enableChannelProbe: true,
+    enableBuilder: true,
     isSyncing: () => refreshRunning,
     onCronIntervalChange: (intervalMinutes: number) => {
       const newCron = intervalToCron(intervalMinutes);

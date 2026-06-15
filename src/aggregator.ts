@@ -9,7 +9,7 @@ import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
 import { mergeLivesToNative, separatedMergeLives, type LiveSourceInput } from './core/live-merger';
 import { loadSpeedMap as loadChannelSpeedMap } from './core/channel-probe';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP } from './core/config';
 import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, siteFingerprint } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson, type FetchProxyConfig } from './core/fetcher';
@@ -220,7 +220,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   const allConfigs = [...filteredConfigs, ...inlineConfigs, ...macCMSConfigs];
   const mergeResult = mergeConfigs(allConfigs);
   let merged = mergeResult.config;
-  const siteSourceMap = mergeResult.siteSourceMap;
+  const { siteSourceMap, parseSourceMap, liveSourceMap } = mergeResult;
 
   // Step 4.5: 黑名单过滤
   logger.info('aggregation', 'Step 4.5: Applying blacklist...');
@@ -229,6 +229,13 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
 
   // 保存过滤前的完整配置（供配置编辑器显示已屏蔽项）
   await storage.put(KV_MERGED_CONFIG_FULL, JSON.stringify(merged));
+
+  // 保存源追踪映射（供 builder 使用）
+  await storage.put(KV_SOURCE_MAP, JSON.stringify({
+    sites: Object.fromEntries(siteSourceMap),
+    parses: Object.fromEntries(parseSourceMap),
+    lives: Object.fromEntries(liveSourceMap),
+  }));
 
   if (hasBlacklist) {
     // 自动清理黑名单中已不存在的条目（必须在过滤前比对，否则被屏蔽的条目会被误判为"过时"而清掉）

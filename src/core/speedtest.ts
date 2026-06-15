@@ -71,6 +71,9 @@ function validateResponseContent(siteType: number, body: string): boolean {
   return body.length > 0;
 }
 
+const CONCURRENCY = 30;
+const BATCH_BUDGET_MS = 180_000; // 整体测速预算 3 分钟
+
 export async function batchSiteSpeedTest(
   sites: TVBoxSite[],
   timeoutMs: number,
@@ -87,25 +90,47 @@ export async function batchSiteSpeedTest(
 
   if (tasks.length === 0) return new Map();
 
-  logger.infoFields('speedtest', 'batch-start', { sites: tasks.length, deep });
-
-  const results = await Promise.allSettled(
-    tasks.map(async ({ key, url, type }) => {
-      const probe = await siteProbe(url, type, timeoutMs, deep);
-      return { key, ...probe };
-    }),
-  );
+  logger.infoFields('speedtest', 'batch-start', { sites: tasks.length, deep, concurrency: CONCURRENCY });
 
   const probeMap = new Map<string, SiteProbeResult>();
-  for (const result of results) {
-    if (result.status === 'fulfilled') {
-      probeMap.set(result.value.key, result.value);
+  const deadline = Date.now() + BATCH_BUDGET_MS;
+  let cursor = 0;
+  let active = 0;
+  let budgetExhausted = false;
+
+  await new Promise<void>((resolve) => {
+    function scheduleNext() {
+      while (active < CONCURRENCY && cursor < tasks.length) {
+        if (Date.now() >= deadline) {
+          budgetExhausted = true;
+          break;
+        }
+        const task = tasks[cursor++];
+        active++;
+        siteProbe(task.url, task.type, timeoutMs, deep).then((probe) => {
+          probeMap.set(task.key, { key: task.key, ...probe });
+          active--;
+          scheduleNext();
+        });
+      }
+      if (active === 0) resolve();
     }
+    scheduleNext();
+  });
+
+  // 超时未测的站点标记为 timeout
+  if (budgetExhausted) {
+    const skipped = tasks.length - cursor;
+    for (let i = cursor; i < tasks.length; i++) {
+      probeMap.set(tasks[i].key, { key: tasks[i].key, speedMs: null, result: 'timeout' });
+    }
+    logger.warnFields('speedtest', 'budget-exhausted', { completed: cursor, skipped });
   }
 
   const ok = [...probeMap.values()].filter(v => v.result === 'ok').length;
   const empty = [...probeMap.values()].filter(v => v.result === 'empty').length;
-  logger.infoFields('speedtest', 'batch-done', { ok, empty, error: probeMap.size - ok - empty, total: probeMap.size });
+  const timedOut = [...probeMap.values()].filter(v => v.result === 'timeout').length;
+  logger.infoFields('speedtest', 'batch-done', { ok, empty, timeout: timedOut, error: probeMap.size - ok - empty - timedOut, total: probeMap.size });
 
   return probeMap;
 }
@@ -154,6 +179,7 @@ function getTestableUrl(site: TVBoxSite): string | null {
   const api = site.api || '';
 
   if (site.type === 1) {
+    if (!api.startsWith('http')) return null;
     return api.includes('?') ? `${api}&ac=list` : `${api}?ac=list`;
   }
 

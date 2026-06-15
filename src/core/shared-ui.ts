@@ -199,4 +199,20 @@ function loadBgFromServer() {
     }
   }).catch(function() {});
 }
+
+function loadVersion() {
+  fetch('/version').then(function(r) {
+    if (!r.ok) return;
+    return r.json();
+  }).then(function(data) {
+    if (!data || !data.version) return;
+    var el = document.querySelector('.header-top');
+    if (!el) return;
+    var badge = document.createElement('span');
+    badge.style.cssText = 'font-family:var(--mono);font-size:0.65rem;color:var(--text-dim);padding:2px 8px;background:var(--surface-2);border-radius:10px;';
+    badge.textContent = 'v' + data.version;
+    if (data.commit && data.commit !== 'unknown') badge.title = 'commit: ' + data.commit;
+    el.appendChild(badge);
+  }).catch(function() {});
+}
 `;

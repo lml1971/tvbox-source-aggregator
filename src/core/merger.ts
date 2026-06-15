@@ -21,13 +21,17 @@ import {
  */
 export interface MergeResult {
   config: TVBoxConfig;
-  siteSourceMap: Map<string, string>;  // site.key → sourceName
+  siteSourceMap: Map<string, string>;   // site.key → sourceName
+  parseSourceMap: Map<string, string>;  // parse.url → sourceName
+  liveSourceMap: Map<string, string>;   // (live.url || live.api) → sourceName
 }
 
 export function mergeConfigs(sourcedConfigs: SourcedConfig[]): MergeResult {
   // Step 1: 规范化所有配置
   const normalized = sourcedConfigs.map(normalizeConfig);
   const siteSourceMap = new Map<string, string>();
+  const parseSourceMap = new Map<string, string>();
+  const liveSourceMap = new Map<string, string>();
 
   // Step 2: 确定全局 spider（投票制：选引用最多 type:3 站点的 JAR）
   const globalSpider = selectGlobalSpider(normalized);
@@ -62,8 +66,23 @@ export function mergeConfigs(sourcedConfigs: SourcedConfig[]): MergeResult {
       }
     }
 
-    if (config.parses) allParses.push(...config.parses);
-    if (config.lives) allLives.push(...config.lives);
+    if (config.parses) {
+      for (const p of config.parses) {
+        if (p.url && !parseSourceMap.has(p.url)) {
+          parseSourceMap.set(p.url, sourced.sourceName);
+        }
+      }
+      allParses.push(...config.parses);
+    }
+    if (config.lives) {
+      for (const l of config.lives) {
+        const liveId = l.url || l.api || '';
+        if (liveId && !liveSourceMap.has(liveId)) {
+          liveSourceMap.set(liveId, sourced.sourceName);
+        }
+      }
+      allLives.push(...config.lives);
+    }
     if (config.hosts) allHosts.push(...config.hosts);
     if (config.rules) allRules.push(...config.rules);
     if (config.doh) allDoh.push(...config.doh);
@@ -123,7 +142,7 @@ export function mergeConfigs(sourcedConfigs: SourcedConfig[]): MergeResult {
       `${merged.parses?.length} parses, ${merged.lives?.length} lives`,
   );
 
-  return { config: merged, siteSourceMap };
+  return { config: merged, siteSourceMap, parseSourceMap, liveSourceMap };
 }
 
 /**

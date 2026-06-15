@@ -32,6 +32,7 @@ export interface AppDeps {
   triggerRefresh: () => Promise<void>;
   onCronIntervalChange?: (intervalMinutes: number) => void;
   enableChannelProbe?: boolean; // 仅 Node/Docker 入口启用
+  enableBuilder?: boolean;      // 仅 Node/Docker 入口启用（配置构建器）
   isSyncing?: () => boolean;
 }
 
@@ -86,6 +87,12 @@ export function createApp(deps: AppDeps): Hono {
       }
     });
   }
+
+  // ─── 版本信息 ──────────────────────────────────────────
+  app.get('/version', (c) => {
+    const { APP_VERSION, APP_COMMIT } = require('./core/version');
+    return c.json({ version: APP_VERSION, commit: APP_COMMIT });
+  });
 
   // ─── 占位符替换辅助 ────────────────────────────────────
   async function resolveBaseUrl(c: import('hono').Context): Promise<string | Response> {
@@ -1839,6 +1846,13 @@ export function createApp(deps: AppDeps): Hono {
   // 频道级测速 admin 路由（仅 Node/Docker 启用）
   if (deps.enableChannelProbe) {
     mountChannelProbeRoutes(app, { storage, config });
+  }
+
+  // Builder 路由（仅 Node/Docker 启用，动态 import 避免 CF bundle 引入 fs/path）
+  if (deps.enableBuilder) {
+    import('./routes/builder').then(({ mountBuilderRoutes }) => {
+      mountBuilderRoutes(app, { storage, config });
+    });
   }
 
   // ─── 图片代理（供 reader 漫画阅读器使用）─────────────────

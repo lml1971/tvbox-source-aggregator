@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 
 const { build } = require('esbuild');
+const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+
+const pkg = require(path.join(__dirname, '..', 'package.json'));
+let commit = 'unknown';
+try { commit = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim(); } catch {}
 
 build({
   entryPoints: [path.join(__dirname, '..', 'src', 'node-entry.ts')],
@@ -13,6 +18,10 @@ build({
   format: 'cjs',
   external: ['better-sqlite3'],
   sourcemap: true,
+  define: {
+    '__APP_VERSION__': JSON.stringify(pkg.version),
+    '__APP_COMMIT__': JSON.stringify(commit),
+  },
 }).then(() => {
   // Copy static fonts to dist
   const srcFonts = path.join(__dirname, '..', 'src', 'static', 'fonts');

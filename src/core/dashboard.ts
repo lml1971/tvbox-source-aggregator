@@ -340,6 +340,7 @@ ${sharedStyles}
     <nav class="header-nav">
       <a href="/admin" data-i18n="navAdmin">Admin</a>
       <a href="/admin/config-editor" data-i18n="navConfigEditor">Config Editor</a>
+      <a href="/builder">Builder</a>
     </nav>
   </header>
 
@@ -694,6 +695,7 @@ function renderHealthTable(records) {
 applyTheme(getTheme());
 initThemeDropdown();
 loadBgFromServer();
+loadVersion();
 applyLang(translations, getLang());
 loadStatus();
 loadSourceHealth();

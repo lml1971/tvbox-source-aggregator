@@ -115,6 +115,9 @@ function resolveExt(
 function resolveUrl(url: string, baseUrl: string): string {
   if (!url) return url;
 
+  // 包含占位符的 URL 不做解析（避免 new URL() 对 {{ }} 做 percent-encoding）
+  if (url.includes('{{') && url.includes('}}')) return url;
+
   // 已经是绝对 URL
   if (url.startsWith('http://') || url.startsWith('https://')) return url;
 

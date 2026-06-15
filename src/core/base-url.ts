@@ -9,7 +9,9 @@ export function getRequestBaseUrl(c: Context, fallback: string): string {
 }
 
 export function applyBaseUrlPlaceholder(json: string, baseUrl: string): string {
-  return json.replaceAll(BASE_URL_PLACEHOLDER, baseUrl);
+  let result = json.replaceAll(BASE_URL_PLACEHOLDER, baseUrl);
+  result = result.replaceAll('%7B%7BBASE_URL%7D%7D', baseUrl);
+  return result;
 }
 
 function stripHostPort(host: string): string {
