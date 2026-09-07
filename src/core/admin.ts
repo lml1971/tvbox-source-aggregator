@@ -369,8 +369,14 @@ ${sharedStyles}
       <div class="section-title" data-i18n="addLiveSource">Add Live Source</div>
       <div class="add-form">
         <input class="name-input" type="text" id="liveName" placeholder="Name (e.g. iptv365)" data-i18n-placeholder="liveNamePh">
-        <input type="url" id="liveUrl" placeholder="m3u/txt URL" data-i18n-placeholder="liveUrlPh">
+        <input type="text" id="liveUrl" placeholder="m3u/txt URL or direct stream URL" data-i18n-placeholder="liveUrlPh">
         <button class="btn" id="liveAddBtn" onclick="addLive()" data-i18n="add">Add</button>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem">
+          <input type="checkbox" id="liveDirect">
+          <span data-i18n="liveDirectLabel">Direct stream URL (single channel, not m3u/txt file)</span>
+        </label>
       </div>
     </div>
 
@@ -705,7 +711,8 @@ const translations = {
     addLiveSource:'Add Live Source', liveSources:'Live Sources',
     nameOptional:'Name (optional)', configJsonUrl:'TVBox config JSON URL',
     mcKeyPh:'Key (e.g. hongniuzy)', mcNamePh:'Name', mcApiPh:'MacCMS API URL',
-    liveNamePh:'Name (e.g. iptv365)', liveUrlPh:'m3u/txt URL',
+    liveNamePh:'Name (e.g. iptv365)', liveUrlPh:'m3u/txt URL or direct stream URL',
+    liveDirectLabel:'Direct stream URL (single channel, not m3u/txt file)',
     add:'Add', adding:'Adding...', batchImport:'Batch Import',
     submitBatch:'Submit Batch',
     refresh:'Refresh', running:'Running...', remove:'Remove', test:'Test',
@@ -781,7 +788,8 @@ const translations = {
     addLiveSource:'添加直播源', liveSources:'直播源列表',
     nameOptional:'名称（可选）', configJsonUrl:'TVBox 配置 JSON 地址',
     mcKeyPh:'Key（如 hongniuzy）', mcNamePh:'名称', mcApiPh:'MacCMS API 地址',
-    liveNamePh:'名称（如 iptv365）', liveUrlPh:'m3u/txt 地址',
+    liveNamePh:'名称（如 iptv365）', liveUrlPh:'m3u/txt 地址或直链流地址',
+    liveDirectLabel:'直链流地址（单频道，非 m3u/txt 文件）',
     add:'添加', adding:'添加中...', batchImport:'批量导入',
     submitBatch:'提交批量',
     refresh:'刷新', running:'运行中...', remove:'删除', test:'测试',
@@ -1146,7 +1154,7 @@ async function loadLives() {
 
     list.innerHTML = entries.map(s => \`
       <div class="source-item">
-        <span class="source-tag manual">LIVE</span>
+        <span class="source-tag manual">\${s.direct ? 'DIRECT' : 'LIVE'}</span>
         <div class="source-info">
           <div class="source-name">\${esc(s.name || 'Unnamed')}</div>
           <div class="source-url">\${esc(s.url)}</div>
@@ -1162,9 +1170,18 @@ async function loadLives() {
 }
 
 async function addLive() {
-  const url = $('liveUrl').value.trim();
+  let url = $('liveUrl').value.trim();
   if (!url) { $('liveUrl').focus(); return; }
   const name = $('liveName').value.trim() || '';
+  const direct = $('liveDirect')?.checked || false;
+
+  // 自动补全协议（与服务端保持一致）
+  if (!url.toLowerCase().startsWith('http://') && !url.toLowerCase().startsWith('https://') && !url.startsWith('//')) {
+    url = 'http://' + url;
+  }
+  if (url.startsWith('//')) {
+    url = 'https:' + url;
+  }
 
   const btn = $('liveAddBtn');
   btn.textContent = t('adding');
@@ -1174,13 +1191,14 @@ async function addLive() {
     const res = await auth.authFetch('/admin/lives', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, url })
+      body: JSON.stringify({ name, url, direct })
     });
     const d = await res.json();
     if (res.ok) {
       toast(t('liveSourceAdded'));
       $('liveUrl').value = '';
       $('liveName').value = '';
+      if ($('liveDirect')) $('liveDirect').checked = false;
       loadLives();
     } else {
       toast(d.error || 'Failed to add', 'error');

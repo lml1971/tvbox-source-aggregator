@@ -27,7 +27,13 @@ async function siteProbe(url: string, siteType: number, timeoutMs: number, deep:
     const body = await resp.text();
 
     if (!deep) {
-      return { speedMs, result: body.length > 0 ? 'ok' : 'empty' };
+      // 浅模式：基本有效性检测（排除 HTML 错误页和空响应）
+      if (!body || body.length === 0) return { speedMs, result: 'empty' };
+      // HTML 错误页检测（非 API 响应）
+      if ((body.includes('<!DOCTYPE html') || body.includes('<html')) && !body.includes('"list"') && !body.includes('<list>')) {
+        return { speedMs, result: 'empty' };
+      }
+      return { speedMs, result: 'ok' };
     }
 
     const valid = validateResponseContent(siteType, body);
@@ -45,11 +51,26 @@ async function siteProbe(url: string, siteType: number, timeoutMs: number, deep:
 function validateResponseContent(siteType: number, body: string): boolean {
   if (!body || body.length < 10) return false;
 
+  // 通用：HTML 错误页面检测
+  const looksLikeHtmlError =
+    (body.includes('<!DOCTYPE html') || body.includes('<html') || body.includes('<head')) &&
+    !body.includes('"list"') && !body.includes('<list>') && !body.includes('<video>');
+  if (looksLikeHtmlError) return false;
+
+  // 通用：空 JSON 对象或纯错误信息
+  if (body.trim() === '{}' || body.trim() === '[]') return false;
+  if (body.includes('"code"') && body.includes('"msg"') && body.includes('"error"') && !body.includes('"list"')) return false;
+
   if (siteType === 1) {
     try {
       const json = JSON.parse(body);
+      // 标准 MacCMS/TVBox JSON 响应
       if (Array.isArray(json.list) && json.list.length > 0) return true;
       if (Array.isArray(json.class) && json.class.length > 0) return true;
+      // 部分源返回 code+msg 但有 list
+      if (json.code !== undefined && Array.isArray(json.list)) return json.list.length > 0;
+      // 部分源只返回 class（分类列表）
+      if (json.code !== undefined && Array.isArray(json.class)) return json.class.length > 0;
       return false;
     } catch {
       return false;
@@ -57,17 +78,23 @@ function validateResponseContent(siteType: number, body: string): boolean {
   }
 
   if (siteType === 0) {
+    // XML 格式
     if (body.includes('<list>') || body.includes('<video>') || body.includes('<class>')) return true;
+    if (body.includes('<?xml') && body.includes('<')) return true;
+    // 部分 XML 源返回 XML 声明 + 内容
+    if (body.includes('<rss') || body.includes('<channels')) return true;
     try {
       const json = JSON.parse(body);
       if (Array.isArray(json.list) && json.list.length > 0) return true;
       if (Array.isArray(json.class) && json.class.length > 0) return true;
       return false;
     } catch {
+      // 既不是 XML 也不是 JSON → 无效
       return false;
     }
   }
 
+  // type 3 (JAR): 无法在服务端验证内容，保留
   return body.length > 0;
 }
 

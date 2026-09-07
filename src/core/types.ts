@@ -93,6 +93,10 @@ export interface MacCMSSourceEntry {
 export interface LiveSourceEntry {
   name: string;
   url: string;
+  ua?: string;           // 自定义 User-Agent
+  header?: Record<string, string>; // 自定义请求头
+  epg?: string;         // EPG 地址
+  direct?: boolean;     // true=直接流地址（单频道），false/undefined=m3u/txt 文件
 }
 
 // 源条目

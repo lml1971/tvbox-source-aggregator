@@ -27,7 +27,8 @@ export interface LiveTestResult {
 
 /**
  * 对单个直播源 URL 做连通性测试
- * GET + 读取前 1KB 嗅探内容
+ * GET + 读取前 1KB 嗅探内容格式
+ * 内容不匹配 m3u/txt 格式时标记为不可达
  */
 async function testLiveSource(
   entry: LiveSourceEntry,
@@ -40,11 +41,18 @@ async function testLiveSource(
     const start = Date.now();
     const resp = await fetch(entry.url, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'okhttp/3.12.0' },
+      headers: { 'User-Agent': 'okhttp/3.12.0', ...(entry.header || {}) },
     });
     const speedMs = Date.now() - start;
 
     if (!resp.ok) {
+      return { name: entry.name, url: entry.url, reachable: false, speedMs };
+    }
+
+    // 检查 Content-Type：如果是 HTML 页面（非 m3u/txt），可能不是有效直播源
+    const contentType = resp.headers.get('Content-Type') || '';
+    if (contentType.includes('text/html') && !contentType.includes('m3u')) {
+      console.log(`[live-source] ${entry.name}: Content-Type is HTML, likely not a valid live source`);
       return { name: entry.name, url: entry.url, reachable: false, speedMs };
     }
 
@@ -58,13 +66,19 @@ async function testLiveSource(
           // 基本格式嗅探：包含 #EXTM3U 或 ,http 或频道名模式则认为有效
           const looksValid =
             text.includes('#EXTM3U') ||
-            text.includes(',http') ||
-            text.includes('CCTV') ||
             text.includes('#EXTINF') ||
-            /^.+,https?:\/\//m.test(text);
+            text.includes(',http') ||
+            text.includes(',https') ||
+            text.includes('CCTV') ||
+            text.includes('央视') ||
+            text.includes('卫视') ||
+            /^.+,https?:\/\//m.test(text) ||
+            /#genre#/i.test(text);
 
           if (!looksValid) {
-            console.log(`[live-source] ${entry.name}: content doesn't look like m3u/txt, keeping anyway`);
+            // 内容不匹配任何直播源格式 → 标记为不可达
+            console.log(`[live-source] ${entry.name}: content doesn't match m3u/txt format, marking unreachable`);
+            return { name: entry.name, url: entry.url, reachable: false, speedMs };
           }
         }
       } finally {

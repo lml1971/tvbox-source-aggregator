@@ -7,6 +7,7 @@ import type {
   ChannelSpeedMap,
 } from './types';
 import { TVBOX_UA, BROWSER_UA } from './config';
+import { normalizeUrl } from './dedup';
 
 // ─── 输入条目 ──────────────────────────────────────────
 
@@ -307,7 +308,7 @@ export async function mergeLivesToNative(
       };
       channelMap.set(normName, agg);
     }
-    if (!agg.urls.has(e.url)) {
+    if (!agg.urls.has(normalizeUrl(e.url))) {
       agg.urls.set(e.url, e);
     }
     if (!agg.logo && e.logo) agg.logo = e.logo;
@@ -458,15 +459,20 @@ export async function separatedMergeLives(
       const entries = parseLiveContent(content, sourceName, input.speedMs);
       if (entries.length === 0) continue;
 
-      // 按 group 分组（源内去重）
+      // 按 group 分组（源内去重，规范化 URL）
       const groupMap = new Map<string, Map<string, string[]>>();
+      const seenUrls = new Set<string>();
       for (const e of entries) {
         const grp = e.group || '其他';
         if (!groupMap.has(grp)) groupMap.set(grp, new Map());
         const channels = groupMap.get(grp)!;
         if (!channels.has(e.name)) channels.set(e.name, []);
         const urls = channels.get(e.name)!;
-        if (!urls.includes(e.url)) urls.push(e.url);
+        const normUrl = normalizeUrl(e.url);
+        if (!seenUrls.has(normUrl)) {
+          urls.push(e.url);
+          seenUrls.add(normUrl);
+        }
       }
 
       // 用「源名」前缀拼接 group 名
@@ -546,15 +552,20 @@ export async function fetchAndParseLiveUrls(
     allEntries.push(...entries);
   }
 
-  // 按 group + name 合并 urls
+  // 按 group + name 合并 urls（规范化 URL 去重）
   const groupMap = new Map<string, Map<string, string[]>>();
+  const seenUrls = new Set<string>();
   for (const e of allEntries) {
     const grp = e.group || '其他';
     if (!groupMap.has(grp)) groupMap.set(grp, new Map());
     const channels = groupMap.get(grp)!;
     if (!channels.has(e.name)) channels.set(e.name, []);
     const urls = channels.get(e.name)!;
-    if (!urls.includes(e.url)) urls.push(e.url);
+    const normUrl = normalizeUrl(e.url);
+    if (!seenUrls.has(normUrl)) {
+      urls.push(e.url);
+      seenUrls.add(normUrl);
+    }
   }
 
   const groups: TVBoxLiveGroup[] = [];

@@ -3,9 +3,40 @@
 import type { TVBoxSite, TVBoxParse, TVBoxLive, TVBoxDoh, TVBoxRule } from './types';
 
 /**
+ * URL 规范化：用于去重时统一比较
+ * - 去除尾部斜杠
+ * - 协议、host 转小写
+ * - 去除默认端口 (:80 http / :443 https)
+ * - 去除 fragment (#...)
+ * - 保留 query 参数（顺序敏感）
+ */
+export function normalizeUrl(url: string): string {
+  if (!url) return '';
+  let u = url.trim();
+  try {
+    const parsed = new URL(u);
+    // 协议 + host 小写，去默认端口
+    let protocol = parsed.protocol.toLowerCase();
+    let host = parsed.hostname.toLowerCase();
+    let port = parsed.port;
+    if ((protocol === 'http:' && port === '80') || (protocol === 'https:' && port === '443')) {
+      port = '';
+    }
+    u = `${protocol}//${host}${port ? ':' + port : ''}${parsed.pathname.replace(/\/+$/, '') || '/'}${parsed.search}`;
+    // 去 fragment
+    u = u.replace(/#.*$/, '');
+  } catch {
+    // 非 URL 格式（如 csp_xxx 类名），做基本清理
+    u = u.replace(/\/+$/, '').replace(/#.*$/, '');
+  }
+  return u;
+}
+
+/**
  * 站点去重
  * 去重键: key + api（所有类型统一，JAR 差异不作为区分维度）
  * 冲突: key 相同但 api 不同 → key 加来源后缀
+ * 额外: 按 api URL 去重（不同 key 但同 URL 视为重复，保留第一个）
  */
 export function deduplicateSites(sites: TVBoxSite[]): TVBoxSite[] {
   const keyMap = new Map<string, TVBoxSite>(); // key → first site
@@ -15,12 +46,23 @@ export function deduplicateSites(sites: TVBoxSite[]): TVBoxSite[] {
 
   const result: TVBoxSite[] = [];
   const seen = new Set<string>();
+  const seenApiUrls = new Set<string>(); // 规范化 api URL 去重
   const usedKeys = new Map<string, number>(); // key → count, for suffix
 
   for (const site of sites) {
     const dk = dedupKey(site);
     if (seen.has(dk)) continue;
     seen.add(dk);
+
+    // 按网络连接地址去重：不同 key 但同 api URL → 跳过
+    if (site.api && /^https?:\/\//i.test(site.api)) {
+      const normApi = normalizeUrl(site.api);
+      if (seenApiUrls.has(normApi)) {
+        console.log(`[dedup] Site "${site.key}" skipped: duplicate API URL "${site.api}"`);
+        continue;
+      }
+      seenApiUrls.add(normApi);
+    }
 
     // 处理 key 冲突：同 key 不同内容
     if (keyMap.has(site.key)) {
@@ -46,14 +88,16 @@ export function deduplicateSites(sites: TVBoxSite[]): TVBoxSite[] {
 }
 
 /**
- * 解析器去重 (url + type)
+ * 解析器去重 (normalized url + type)
  * 按 url+type 去重而非 name+url，同一 URL 不同 name 视为同一解析
  * 保留 type 维度防止嗅探(0)和 JSON(1)解析被误合并
+ * URL 经规范化处理，消除协议大小写、尾部斜杠、默认端口等差异
  */
 export function deduplicateParses(parses: TVBoxParse[]): TVBoxParse[] {
   const seen = new Set<string>();
   return parses.filter((parse) => {
-    const key = `${parse.url}|${parse.type ?? 0}`;
+    const normUrl = normalizeUrl(parse.url || '');
+    const key = `${normUrl}|${parse.type ?? 0}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -61,13 +105,15 @@ export function deduplicateParses(parses: TVBoxParse[]): TVBoxParse[] {
 }
 
 /**
- * 直播源去重 (url)
+ * 直播源去重 (normalized url)
+ * URL 经规范化处理，消除协议大小写、尾部斜杠、默认端口等差异
  */
 export function deduplicateLives(lives: TVBoxLive[]): TVBoxLive[] {
   const seen = new Set<string>();
   return lives.filter((live) => {
-    const url = live.url || live.api || '';
-    if (!url) return true; // 无 URL 的保留
+    const rawUrl = live.url || live.api || '';
+    if (!rawUrl) return true; // 无 URL 的保留（Native 格式 group/channels）
+    const url = normalizeUrl(rawUrl);
     if (seen.has(url)) return false;
     seen.add(url);
     return true;
